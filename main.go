@@ -84,6 +84,14 @@ func main() {
 	}
 
 	reg := workerreg.New(time.Duration(cfg.Worker.TimeoutSeconds)*time.Second, log)
+	if len(cfg.Worker.AllowedCIDRs) > 0 {
+		pol, err := workerreg.NewAddressPolicy(cfg.Worker.AllowedCIDRs)
+		if err != nil {
+			fail(err)
+		}
+		reg.SetPolicy(pol)
+		log.Info("worker 地址白名单已启用", "cidrs", cfg.Worker.AllowedCIDRs)
+	}
 	il := instancelog.New(cfg.Log.Dir, time.Duration(cfg.Log.InstanceRetentionDays)*24*time.Hour)
 	exec := dispatch.New(reg, 10*time.Second) // 派发 POST 超时(远小于实例执行超时)
 	sch := dispatch.NewScheduler(st, exec, il, time.Duration(cfg.Scheduler.IntervalMs)*time.Millisecond, log)

@@ -57,7 +57,8 @@ type Scheduler struct {
 }
 
 type Worker struct {
-	TimeoutSeconds int `yaml:"timeout_seconds"` // worker 心跳超时(秒),超过视为离线
+	TimeoutSeconds int      `yaml:"timeout_seconds"` // worker 心跳超时(秒),超过视为离线
+	AllowedCIDRs   []string `yaml:"allowed_cidrs"`   // 可选:worker 地址白名单(CIDR 或单 IP),空=不限制(SSRF 纵深防御)
 }
 
 // PowerJob 兼容协议配置。/server/* 端点始终挂载(标准 PowerJob Java worker 不改源码接入);

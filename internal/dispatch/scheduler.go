@@ -3,6 +3,7 @@ package dispatch
 import (
 	"container/heap"
 	"context"
+	"fmt"
 	"log/slog"
 	"sort"
 	"strconv"
@@ -179,9 +180,10 @@ func (h pqHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
 func (h *pqHeap) Push(x any)         { *h = append(*h, x.(manualItem)) }
 func (h *pqHeap) Pop() any           { old := *h; x := old[len(old)-1]; *h = old[:len(old)-1]; return x }
 
-// SubmitManual 将一次手动触发入优先队列,由 RunManualDispatcher 按 MaxConcurrency 调度。
-// 实例已 CreateQueued 落库:即便进程崩溃,也不会丢失(后续可由 pump 捞起,见下)。
-func (s *Scheduler) SubmitManual(ctx context.Context, job *domain.Job, priority int, instanceParams string) {
+// SubmitManual 将一次手动触发落库(queued)并入优先队列,由 RunManualDispatcher 按
+// MaxConcurrency 调度。返回 error 仅在实例落库失败时非 nil——此前为 fire-and-forget,
+// 调用方无法感知落库失败会空报 triggered。重启后残留的 queued 实例由 RecoverManualQueued 恢复。
+func (s *Scheduler) SubmitManual(ctx context.Context, job *domain.Job, priority int, instanceParams string) error {
 	now := time.Now()
 	ins := &domain.Instance{
 		JobID:             job.ID,
@@ -194,18 +196,15 @@ func (s *Scheduler) SubmitManual(ctx context.Context, job *domain.Job, priority 
 		JobInstanceParams: instanceParams,
 	}
 	if err := s.store.Instance.Create(ins); err != nil {
-		s.log.Error("创建 queued 实例失败", "job_id", job.ID, "err", err)
-		return
+		return fmt.Errorf("创建 queued 实例失败: %w", err)
 	}
 	s.appendLog(job, ins, "CREATE", "info", "手动触发排队")
 	s.pqMu.Lock()
 	s.pqSeq++
 	heap.Push(&s.pq, manualItem{job: job, ins: ins, priority: priority, seq: s.pqSeq})
 	s.pqMu.Unlock()
-	select {
-	case s.wake <- struct{}{}:
-	default:
-	}
+	s.notifyWake()
+	return nil
 }
 
 // RunManualDispatcher 按 MaxConcurrency 消费手动队列:抢任务级槽 → 派发(槽随实例生命周期)。
@@ -223,15 +222,17 @@ func (s *Scheduler) RunManualDispatcher(ctx context.Context) {
 			continue
 		}
 		if !s.tryAcquire(item.job.ID, item.job.MaxConcurrency) {
-			// 超限:实例仍为 queued 等待后续 pump(本阶段简化,先留库)。
-			// 不归还槽(未抢到)。重入队或靠 pump 捞,这里直接丢回队列尾部重试。
+			// 超限:实例仍为 queued,丢回队列尾部,等槽释放(wake)或兜底退避后重试。
+			// 不归还槽(未抢到)。wake 由 releaseByJob/releaseByInstance 在槽释放时发出,
+			// 使排队实例在终态/失败释放后立即被重派,而非盲轮询。
 			s.pqMu.Lock()
 			heap.Push(&s.pq, item)
 			s.pqMu.Unlock()
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(20 * time.Millisecond):
+			case <-s.wake:
+			case <-time.After(100 * time.Millisecond):
 			}
 			continue
 		}
@@ -337,6 +338,7 @@ func (s *Scheduler) releaseByJob(jobID int64) {
 		s.slots[jobID]--
 	}
 	s.slotMu.Unlock()
+	s.notifyWake() // 槽空出:唤醒手动派发器重试排队实例
 }
 
 // bindHeld 将"已 tryAcquire 的槽"绑定到实例(不重复 +1,仅记映射),供终态按实例释放。
@@ -359,6 +361,16 @@ func (s *Scheduler) releaseByInstance(insID int64) {
 		}
 	}
 	s.slotMu.Unlock()
+	s.notifyWake() // 槽空出:唤醒手动派发器重试排队实例
+}
+
+// notifyWake 非阻塞唤醒手动派发器:新实例入队(SubmitManual)或槽释放(终态/失败)时调用。
+// wake 为 cap=1 的 channel,合并多次信号(派发器醒来会 pop 尽可能多的可派实例)。
+func (s *Scheduler) notifyWake() {
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
 }
 
 // ReleaseInFlight worker 回报终态 / reaper 转移时调用,释放该实例占用的槽(幂等)。

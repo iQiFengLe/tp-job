@@ -38,16 +38,39 @@ type Registry struct {
 	workers map[int64]map[string]*WorkerInfo // appID -> address -> info
 	timeout time.Duration
 	log     *slog.Logger
+	policy  *AddressPolicy // 可选地址白名单;nil=不限制(默认)
 }
 
 func New(timeout time.Duration, log *slog.Logger) *Registry {
 	return &Registry{workers: make(map[int64]map[string]*WorkerInfo), timeout: timeout, log: log}
 }
 
+// SetPolicy 设置 worker 地址白名单(可选)。nil 表示不限制。应在注册心跳前调用(装配期)。
+func (r *Registry) SetPolicy(p *AddressPolicy) {
+	r.mu.Lock()
+	r.policy = p
+	r.mu.Unlock()
+}
+
+// AllowedAddress 地址是否被白名单允许。未设策略时恒 true(向后兼容)。
+// 供协议层在心跳时显式校验、对非法来源返回明确错误(而非 Heartbeat 内静默丢弃)。
+func (r *Registry) AllowedAddress(addr string) bool {
+	r.mu.RLock()
+	p := r.policy
+	r.mu.RUnlock()
+	if p == nil {
+		return true
+	}
+	return p.Allowed(addr)
+}
+
 // Heartbeat 注册或刷新一个 worker。
 func (r *Registry) Heartbeat(w WorkerInfo) {
 	if w.AppID == 0 || w.WorkerAddress == "" {
 		return
+	}
+	if !r.AllowedAddress(w.WorkerAddress) {
+		return // 非白名单地址,拒绝注册(SSRF 纵深防御;无 policy 时放行)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
