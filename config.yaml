@@ -1,0 +1,55 @@
+# 任务调度服务配置(统一 worker 派发模型)
+# 敏感配置(管理员密码、mysql dsn)推荐用环境变量覆盖,见文末「环境变量」表。
+
+server:
+  port: 8080
+  mode: debug            # gin 模式: debug / release / test。release 拒绝默认管理员密码启动(见 auth)
+  max_request_body_mb: 2 # 请求体大小上限(MB)
+
+database:
+  driver: sqlite         # sqlite | mysql(生产高负载建议 mysql)
+  sqlite:
+    path: ./data/task-schedule.db
+  mysql:
+    # 示例值:生产请改用最小权限账号 + 强密码,或用环境变量 TASK_SCHEDULE_MYSQL_DSN 注入。
+    dsn: "root:root@tcp(127.0.0.1:3306)/task_schedule?charset=utf8mb4&parseTime=True&loc=Local"
+    max_open_conns: 50
+    max_idle_conns: 10
+
+log:
+  level: info            # debug / info / warn / error
+  dir: ./logs            # 实例日志亦落此目录:{dir}/instances/{appID}/{instanceID}_{rootInstanceID}.log
+  file_name: task-schedule.log
+  max_size_mb: 100
+  max_backups: 10
+  max_age_days: 30
+  instance_retention_days: 0  # 实例日志保留天数;0=不自动清理(按文件 mtime 清理)
+
+scheduler:
+  interval_ms: 1000   # 调度/reaper/retry 扫描间隔(毫秒)
+
+worker:
+  timeout_seconds: 600   # worker 心跳超时(秒),超过视为离线(reaper 据此失败转移)。默认 10 分钟
+
+powerjob:
+  # /server/* 始终挂载(标准 PowerJob Java worker 不改源码接入)。⚠ /server/*、/worker/* 无鉴权,
+  # 生产必须通过网络隔离保护(见 README):任何人可注册任意 worker 地址 → 到期 job 主动 POST 该地址(SSRF)。
+  server_address: "127.0.0.1:8080"   # /server/acquire 返回值;必须是 PowerJob Worker 可达的 host:port
+
+auth:
+  # 管理员账户(配置注入,不入库)。release 模式下保留默认占位密码会【拒绝启动】。
+  # 开发:整段省略 admins(或留空)则自动种入占位账户 admin / change-me-admin(debug 可用)。
+  # 生产:填 bcrypt 哈希;或用环境变量 TASK_SCHEDULE_ADMIN_USERNAME / TASK_SCHEDULE_ADMIN_PASSWORD 注入明文(加载时 bcrypt)。
+  # admins:
+  #   - username: admin
+  #     password: "$2a$10$...."   # bcrypt 哈希
+  session:
+    ttl_seconds: 86400   # 登录会话有效期(秒)
+
+# 环境变量(优先级高于本文件,便于容器/CI 注入,避免明文落盘):
+#   TASK_SCHEDULE_ADMIN_USERNAME          → auth.admins[0].username
+#   TASK_SCHEDULE_ADMIN_PASSWORD          → auth.admins[0].password(明文,加载时 bcrypt)
+#   TASK_SCHEDULE_DB_DRIVER               → database.driver (sqlite|mysql)
+#   TASK_SCHEDULE_MYSQL_DSN               → database.mysql.dsn
+#   TASK_SCHEDULE_SERVER_MODE             → server.mode (debug|release|test)
+#   TASK_SCHEDULE_POWERJOB_SERVER_ADDRESS → powerjob.server_address

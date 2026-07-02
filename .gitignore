@@ -1,0 +1,24 @@
+# 构建产物
+/task-schedule
+/task-schedule.exe
+*.exe
+/web/dist/
+/web/node_modules/
+*.tsbuildinfo
+/.npm-cache/
+/.playwright-mcp/
+
+# 运行时数据
+/data/
+/logs/
+*.db
+*.db-wal
+*.db-shm
+
+# 本地配置/输出
+server.out
+*.local.yaml
+
+# IDE
+/.idea/
+/.vscode/

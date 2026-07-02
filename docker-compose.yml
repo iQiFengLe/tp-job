@@ -1,0 +1,40 @@
+services:
+  task-schedule:
+    build: .
+    image: task-schedule:latest
+    container_name: task-schedule
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # —— 鉴权(必填)—— release 模式下使用默认占位密码 admin/change-me-admin 会拒绝启动。
+      # 用 openssl rand -hex 16 生成强密码注入;或 config.yaml 填 bcrypt 哈希。
+      TASK_SCHEDULE_ADMIN_USERNAME: ${TASK_SCHEDULE_ADMIN_USERNAME:-admin}
+      TASK_SCHEDULE_ADMIN_PASSWORD: ${TASK_SCHEDULE_ADMIN_PASSWORD:?release 模式必须设置 TASK_SCHEDULE_ADMIN_PASSWORD(用 openssl rand -hex 16 生成)}
+      TASK_SCHEDULE_DB_DRIVER: sqlite
+      TZ: Asia/Shanghai
+      # 生产显式 release(关闭 gin 敏感路由日志);config.yaml 默认 debug 便于本地开箱即用
+      TASK_SCHEDULE_SERVER_MODE: release
+      # TASK_SCHEDULE_MYSQL_DSN: "user:pass@tcp(mysql:3306)/task_schedule?charset=utf8mb4&parseTime=True&loc=Local"
+      # ⚠ 容器化部署:必须是 PowerJob Worker 可达地址,绝不能用 127.0.0.1(那是容器自身)
+      # TASK_SCHEDULE_POWERJOB_SERVER_ADDRESS: "task-schedule:8080"
+    volumes:
+      - ./data:/app/data   # sqlite 数据持久化(切 mysql 后可移除)
+      - ./logs:/app/logs   # 日志 + 实例日志持久化
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+  # ── 可选:MySQL(高负载生产建议替换 sqlite)──
+  # mysql:
+  #   image: mysql:8.4
+  #   container_name: task-schedule-mysql
+  #   restart: unless-stopped
+  #   environment:
+  #     MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD}
+  #     MYSQL_DATABASE: task_schedule
+  #   volumes:
+  #     - ./mysql-data:/var/lib/mysql

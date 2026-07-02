@@ -1,0 +1,254 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 1120px;
+  color: #1f2937;
+  background: #f5f7fb;
+}
+
+.shell {
+  min-height: 100vh;
+}
+
+.side {
+  min-height: 100vh;
+  box-shadow: 3px 0 14px rgba(12, 24, 40, 0.14);
+}
+
+.brand {
+  height: 72px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 20px;
+  color: #fff;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.brand svg {
+  font-size: 24px;
+  color: #7cc4ff;
+}
+
+.brand strong,
+.brand span {
+  display: block;
+}
+
+.brand span {
+  margin-top: 2px;
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 12px;
+}
+
+.topbar {
+  height: 64px;
+  padding: 0 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid #e7ebf3;
+  box-shadow: 0 1px 6px rgba(22, 34, 51, 0.04);
+}
+
+.app-switch {
+  width: 320px;
+}
+
+.content {
+  padding: 24px;
+}
+
+.view {
+  position: relative;
+}
+
+.view-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 24px;
+  margin-bottom: 18px;
+}
+
+.view-head h3 {
+  margin: 0 0 4px;
+}
+
+.panel {
+  background: #fff;
+  border: 1px solid #e7ebf3;
+  border-radius: 8px;
+  padding: 18px;
+  margin-bottom: 16px;
+}
+
+.credentials-panel .ant-form-item {
+  margin-bottom: 0;
+}
+
+.credential-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr) 140px;
+  gap: 16px;
+  align-items: end;
+}
+
+.form-action {
+  white-space: nowrap;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.toolbar-search {
+  width: 320px;
+}
+
+.toolbar-select {
+  width: 160px;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0 16px;
+}
+
+.full {
+  width: 100%;
+}
+
+.link-button {
+  height: auto;
+  padding: 0;
+}
+
+.status-select {
+  width: 118px;
+}
+
+.gate {
+  position: absolute;
+  inset: 88px 0 auto;
+  z-index: 3;
+  min-height: 240px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(245, 247, 251, 0.82);
+  backdrop-filter: blur(2px);
+  border: 1px dashed #c9d3e3;
+  border-radius: 8px;
+}
+
+.ant-table-wrapper {
+  background: #fff;
+  border: 1px solid #e7ebf3;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.ant-table-thead > tr > th {
+  background: #f8fafd !important;
+  color: #344054;
+}
+
+/* 登录页 */
+.login-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #152033 0%, #1f2d4a 100%);
+}
+
+.login-card {
+  width: 380px;
+  padding: 8px 4px 4px;
+}
+
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.login-brand svg {
+  font-size: 28px;
+  color: #1769aa;
+}
+
+.login-brand strong,
+.login-brand span {
+  display: block;
+}
+
+.login-brand span {
+  margin-top: 2px;
+  color: #8a94a6;
+  font-size: 12px;
+}
+
+/* 启动 loading */
+.boot {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 实例日志(原样渲染调度埋点 + worker 上报行) */
+.log-pre {
+  margin: 0;
+  padding: 12px;
+  background: #0f172a;
+  color: #d1d5db;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 70vh;
+  overflow: auto;
+}
+
+@media (max-width: 900px) {
+  body {
+    min-width: 0;
+  }
+
+  .side {
+    display: none;
+  }
+
+  .topbar,
+  .view-head,
+  .toolbar {
+    align-items: stretch;
+    flex-direction: column;
+    height: auto;
+    padding-top: 12px;
+    padding-bottom: 12px;
+  }
+
+  .app-switch,
+  .toolbar-search,
+  .toolbar-select {
+    width: 100%;
+  }
+
+  .credential-grid,
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+}
