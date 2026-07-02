@@ -5,7 +5,6 @@
 package own
 
 import (
-	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -24,7 +23,6 @@ type Deps struct {
 	Jobs      *dservice.JobService
 	Instances *dservice.InstanceService
 	Store     *repository.Store
-	Ctx       context.Context // 应用级 ctx,手动触发随服务关闭而取消
 
 	// Reg worker 心跳注册表(读在线 worker 列表)。为 nil 时 listWorkers 返回空(单测场景)。
 	Reg *workerreg.Registry
@@ -233,7 +231,7 @@ func (d Deps) triggerJob(c *gin.Context) {
 	appID := paramInt64(c, "appId")
 	id := paramInt64(c, "id")
 	priority, _ := strconv.Atoi(c.DefaultQuery("priority", "0"))
-	if err := d.Jobs.Trigger(d.Ctx, appID, id, priority, c.Query("instance_params")); err != nil {
+	if err := d.Jobs.Trigger(appID, id, priority, c.Query("instance_params")); err != nil {
 		fail(c, notFoundStatus(err), err.Error())
 		return
 	}

@@ -2,7 +2,6 @@ package own
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -46,11 +45,9 @@ func newDeps(t *testing.T) (Deps, *repository.Store) {
 	reg := workerreg.New(time.Minute, nil)
 	il := instancelog.New(t.TempDir(), 0)
 	sch := dispatch.NewScheduler(st, dispatch.New(reg, time.Second), il, 50*time.Millisecond, discardLog())
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
 	return Deps{
 		Apps: dservice.NewAppService(st), Jobs: dservice.NewJobService(st, sch),
-		Instances: dservice.NewInstanceService(st, sch, il), Store: st, Ctx: ctx,
+		Instances: dservice.NewInstanceService(st, sch, il), Store: st,
 	}, st
 }
 

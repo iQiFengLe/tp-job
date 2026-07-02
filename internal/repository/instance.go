@@ -136,28 +136,29 @@ func (s InstanceStore) ListRetryDue(now time.Time, limit int) ([]domain.Instance
 	return list, err
 }
 
-// ListGeneralizedActive 已派发但未终结(waiting_receive/running),供 reaper 扫描失败转移。
-func (s InstanceStore) ListGeneralizedActive() ([]domain.Instance, error) {
+// ListGeneralizedActive 已派发但未终结(waiting_receive/running),供 reaper / 启动恢复扫描。
+// limit<=0 取默认上限,避免活跃实例极多时单轮全表扫打爆;调用方应批量预加载 job 消除 N+1。
+// 按 start_time 升序:stallReason 的超时判定亦基于 start_time,卡得最久(最可能 stalled)的实例
+// 优先落在 limit 窗口内——无 ORDER BY 时 DB 返回物理顺序,活跃数 > limit 时可能让不可回收的长任务
+// 占满窗口,而真正 stalled 的实例(start_time 更小)反被截断漏扫。waiting/running 实例派发时即设
+// start_time,非空,无需考虑 NULL 排序。
+func (s InstanceStore) ListGeneralizedActive(limit int) ([]domain.Instance, error) {
+	if limit <= 0 {
+		limit = 500
+	}
 	var list []domain.Instance
 	err := s.db.Where("status IN ?", []string{domain.StatusWaitingReceive, domain.StatusRunning}).
-		Find(&list).Error
+		Order("start_time ASC").Limit(limit).Find(&list).Error
 	return list, err
 }
 
-// ListManualQueued 返回 status=queued 且 trigger_type=manual 的实例,供调度器启动恢复用。
-// 手动优先队列是纯内存,重启即丢;queued 实例不被 reaper/RetryPump 捞,需在启动时重新入队,
-// 否则会永久滞留(违背 SubmitManual 的持久化承诺)。
-func (s InstanceStore) ListManualQueued() ([]domain.Instance, error) {
+// ListQueued 返回 status=queued 的实例(任意 trigger_type:manual/auto/retry),供调度器启动恢复。
+// 手动优先队列是纯内存,重启即丢;queued 实例不被 reaper(只看 waiting_receive/running)/
+// RetryPump(只看 failed)捞,需在启动时重新入队,否则永久滞留。auto/retry 触发路径在
+// Create(queued) 与 Dispatch 之间崩溃也会残留 queued,故恢复不再限定 trigger_type。
+func (s InstanceStore) ListQueued() ([]domain.Instance, error) {
 	var list []domain.Instance
-	err := s.db.Where("status = ? AND trigger_type = ?", domain.StatusQueued, "manual").
-		Find(&list).Error
+	err := s.db.Where("status = ?", domain.StatusQueued).Find(&list).Error
 	return list, err
 }
 
-// MarkStaleActiveAsFailed 启动清理:把重启前未终结的实例标 failed(worker 上下文随进程退出丢失)。
-func (s InstanceStore) MarkStaleActiveAsFailed(reason string) (int64, error) {
-	res := s.db.Model(&domain.Instance{}).
-		Where("status IN ?", []string{domain.StatusWaitingReceive, domain.StatusRunning}).
-		Updates(map[string]any{"status": domain.StatusFailed, "end_time": time.Now(), "result": reason})
-	return res.RowsAffected, res.Error
-}

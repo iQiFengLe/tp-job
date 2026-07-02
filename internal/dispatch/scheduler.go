@@ -114,7 +114,14 @@ func (s *Scheduler) execute(ctx context.Context, job *domain.Job, oldNext time.T
 		}
 	}()
 
-	newNext := computeNextRun(job, time.Now())
+	newNext, nerr := schedtime.NextByKind(job.ScheduleKind, job.ScheduleExpr, time.Now())
+	if nerr != nil {
+		// 表达式非法(被改坏/边界解析失败):不静默置 nil 停摆——先 error 告警,再置 nil 暂停
+		// 该 job 自动调度,等管理员修表达式后 update 触发重算(比旧版静默吞错多了告警)。
+		s.log.Error("推算下次执行失败,暂停该 job 自动调度",
+			"job_id", job.ID, "kind", job.ScheduleKind, "expr", job.ScheduleExpr, "err", nerr)
+		newNext = nil
+	}
 	ok, err := s.store.Job.AdvanceNextRun(job.ID, oldNext, newNext)
 	if err != nil {
 		s.log.Error("认领 job 失败", "job_id", job.ID, "err", err)
@@ -182,8 +189,8 @@ func (h *pqHeap) Pop() any           { old := *h; x := old[len(old)-1]; *h = old
 
 // SubmitManual 将一次手动触发落库(queued)并入优先队列,由 RunManualDispatcher 按
 // MaxConcurrency 调度。返回 error 仅在实例落库失败时非 nil——此前为 fire-and-forget,
-// 调用方无法感知落库失败会空报 triggered。重启后残留的 queued 实例由 RecoverManualQueued 恢复。
-func (s *Scheduler) SubmitManual(ctx context.Context, job *domain.Job, priority int, instanceParams string) error {
+// 调用方无法感知落库失败会空报 triggered。重启后残留的 queued 实例由 RecoverQueued 恢复。
+func (s *Scheduler) SubmitManual(job *domain.Job, priority int, instanceParams string) error {
 	now := time.Now()
 	ins := &domain.Instance{
 		JobID:             job.ID,
@@ -276,14 +283,15 @@ func (s *Scheduler) popPending() (manualItem, bool) {
 	return heap.Pop(&s.pq).(manualItem), true
 }
 
-// RecoverManualQueued 启动恢复:把重启前残留的 queued 手动实例重新入优先队列。
+// RecoverQueued 启动恢复:把重启前残留的 queued 实例(任意 trigger_type)重新入优先队列。
 //
-// pq 是纯内存,重启即丢;而 queued 实例不被 reaper/RetryPump 捞(ListGeneralizedActive 只看
-// waiting_receive/running,ListRetryDue 只看 failed),无人推进会永久滞留——违背 SubmitManual
-// "落库即不丢"的承诺。本方法在启动时扫库,按 priority desc / created_at asc 重建 seq 入队,
-// 保证恢复后顺序稳定。应在 main 启动、MarkStaleActiveAsFailed 之后、RunManualDispatcher 之前调用。
-func (s *Scheduler) RecoverManualQueued() error {
-	list, err := s.store.Instance.ListManualQueued()
+// pq 是纯内存,重启即丢;而 queued 实例不被 reaper(只看 waiting_receive/running)/
+// RetryPump(只看 failed)捞,无人推进会永久滞留——违背 SubmitManual "落库即不丢"的承诺。
+// auto/retry 触发路径(Create(queued) 与 Dispatch 之间)崩溃同样残留 queued,故一并恢复。
+// 按 priority desc / created_at asc 重建 seq 入队,保证恢复后顺序稳定。
+// 应在 main 启动、RecoverStaleActive 之后、RunManualDispatcher 之前调用。
+func (s *Scheduler) RecoverQueued() error {
+	list, err := s.store.Instance.ListQueued()
 	if err != nil {
 		return err
 	}
@@ -309,7 +317,34 @@ func (s *Scheduler) RecoverManualQueued() error {
 		heap.Push(&s.pq, manualItem{job: job, ins: &ins, priority: ins.Priority, seq: s.pqSeq})
 	}
 	if n := s.pq.Len(); n > 0 {
-		s.log.Info("已恢复重启前排队的手动实例", "count", n)
+		s.log.Info("已恢复重启前排队的实例", "count", n)
+	}
+	return nil
+}
+
+// RecoverStaleActive 启动清理:把重启前未终结(waiting_receive/running)的实例做失败转移。
+//
+// 与 reaper 同语义:UpdateResult(failed) + scheduleRetry——后者对有重试余力的实例设 next_retry_time,
+// 由 RetryPump 接管重派(重启不丢);无余力则定格终态 failed。取代旧的 bulk MarkStaleActiveAsFailed:
+// 旧版只标 failed 不衔接重试,导致配了 RetryCount 的 job 在重启窗口内的在飞实例被静默放弃。
+// at-least-once:重派可能与原 worker 的迟到回报并存,业务需幂等。应在 main 启动、RecoverQueued 之前调用。
+func (s *Scheduler) RecoverStaleActive() error {
+	list, err := s.store.Instance.ListGeneralizedActive(s.limit)
+	if err != nil {
+		return err
+	}
+	jobs := s.loadJobs(list) // 批量预加载,消除 scheduleRetry 的逐实例 Job.Get
+	for i := range list {
+		ins := list[i]
+		if err := s.store.Instance.UpdateResult(ins.ID, domain.StatusFailed, "服务重启前未完成"); err != nil {
+			s.log.Error("重启清理实例失败", "instance_id", ins.ID, "err", err)
+			continue
+		}
+		s.appendLogRaw(&ins, "REAP", "error", "失败转移: 服务重启前未完成")
+		s.scheduleRetry(&ins, jobs[ins.JobID])
+	}
+	if n := len(list); n > 0 {
+		s.log.Info("已清理重启前未终结的实例(有重试余力的将由 RetryPump 重派)", "count", n)
 	}
 	return nil
 }
@@ -399,38 +434,74 @@ func (s *Scheduler) RunInstanceReaper(ctx context.Context, reg *workerreg.Regist
 	}
 }
 
+// loadJobs 批量预加载给定实例集合涉及的 job(map[jobID]*Job),供 reaper/retry 消除逐实例
+// Job.Get 的 N+1 查询。加载失败返回空 map(调用方按 nil job 兜底为"job 不存在")。
+func (s *Scheduler) loadJobs(list []domain.Instance) map[int64]*domain.Job {
+	ids := make(map[int64]struct{}, len(list))
+	for i := range list {
+		ids[list[i].JobID] = struct{}{}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	flat := make([]int64, 0, len(ids))
+	for id := range ids {
+		flat = append(flat, id)
+	}
+	jobs, err := s.store.Job.ListByIDs(flat)
+	if err != nil {
+		s.log.Error("批量加载 job 失败", "err", err)
+		return nil
+	}
+	m := make(map[int64]*domain.Job, len(jobs))
+	for i := range jobs {
+		m[jobs[i].ID] = &jobs[i]
+	}
+	return m
+}
+
 func (s *Scheduler) reapOnce(reg *workerreg.Registry) {
-	list, err := s.store.Instance.ListGeneralizedActive()
+	list, err := s.store.Instance.ListGeneralizedActive(s.limit)
 	if err != nil {
 		s.log.Error("reaper 扫描失败", "err", err)
 		return
 	}
+	if len(list) == 0 {
+		return
+	}
+	jobs := s.loadJobs(list) // 批量预加载,消除 N+1
 	now := time.Now()
 	for i := range list {
 		ins := list[i]
-		job, err := s.store.Job.Get(ins.AppID, ins.JobID)
-		if err != nil {
-			s.finalizeReaped(&ins, "job 不存在,失败转移")
+		job := jobs[ins.JobID]
+		if job == nil {
+			s.finalizeReaped(&ins, "job 不存在,失败转移", nil)
 			continue
 		}
 		if reason := s.stallReason(&ins, job, reg, now); reason != "" {
-			s.finalizeReaped(&ins, reason)
+			s.finalizeReaped(&ins, reason, job)
 		}
 	}
 }
 
 // finalizeReaped 标记实例 failed + 释放槽 + 调度重试(设 next_retry_time)。
-func (s *Scheduler) finalizeReaped(ins *domain.Instance, reason string) {
+// job 透传给 scheduleRetry(reaper 路径已 loadJobs,避免重复 Job.Get);nil 时 scheduleRetry 自查。
+func (s *Scheduler) finalizeReaped(ins *domain.Instance, reason string, job *domain.Job) {
 	if err := s.store.Instance.UpdateResult(ins.ID, domain.StatusFailed, reason); err != nil {
 		s.log.Error("reaper 标记失败", "instance_id", ins.ID, "err", err)
 		return
 	}
 	s.appendLogRaw(ins, "REAP", "error", "失败转移: "+reason)
 	s.ReleaseInFlight(ins.ID)
-	s.scheduleRetry(ins)
+	s.scheduleRetry(ins, job)
 }
 
 // stallReason 判定实例是否卡死。空串=未卡死。
+//
+// 兜底优先级:worker 未绑定 → worker 失联 → 执行超时。执行超时仅在 job.TimeoutSec>0 时生效:
+// TimeoutSec=0 表示"不限执行时长"(长任务语义),此时若 worker 持续心跳(在线)却永不推进,
+// 实例会停在 waiting_receive/running 不被回收——故生产强烈建议为 job 配置合理的 TimeoutSec,
+// 否则唯一能兜底的只有 worker 心跳真的停掉(失联判定)。
 func (s *Scheduler) stallReason(ins *domain.Instance, job *domain.Job, reg *workerreg.Registry, now time.Time) string {
 	if ins.WorkerAddress == "" {
 		return "实例缺少 worker 绑定"
@@ -468,15 +539,19 @@ func (s *Scheduler) retryOnce(ctx context.Context) {
 		s.log.Error("retry 扫描失败", "err", err)
 		return
 	}
+	if len(list) == 0 {
+		return
+	}
+	jobs := s.loadJobs(list) // 批量预加载,消除 N+1
 	for i := range list {
 		ins := list[i]
 		got, err := s.store.Instance.ClearNextRetryTime(ins.ID) // 原子去重
 		if err != nil || !got {
 			continue
 		}
-		job, err := s.store.Job.Get(ins.AppID, ins.JobID)
-		if err != nil {
-			continue
+		job := jobs[ins.JobID]
+		if job == nil {
+			continue // job 不存在
 		}
 		if ins.RetryIndex >= job.RetryCount {
 			continue // 已达上限
@@ -522,9 +597,16 @@ func (s *Scheduler) retryInstance(ctx context.Context, job *domain.Job, orig *do
 }
 
 // scheduleRetry failed 实例若仍有重试余力,设 next_retry_time 由 RetryPump 重派。
-func (s *Scheduler) scheduleRetry(ins *domain.Instance) {
-	job, err := s.store.Job.Get(ins.AppID, ins.JobID)
-	if err != nil || job.RetryCount <= 0 || ins.RetryIndex >= job.RetryCount {
+// job 为调用方预加载的 *Job(reaper/recover 路径已批量 loadJobs,避免重复查询);nil 时内部自查。
+func (s *Scheduler) scheduleRetry(ins *domain.Instance, job *domain.Job) {
+	if job == nil {
+		var err error
+		job, err = s.store.Job.Get(ins.AppID, ins.JobID)
+		if err != nil {
+			return
+		}
+	}
+	if job.RetryCount <= 0 || ins.RetryIndex >= job.RetryCount {
 		return
 	}
 	interval := time.Duration(job.RetryIntervalSec) * time.Second
@@ -550,25 +632,4 @@ func (s *Scheduler) appendLog(job *domain.Job, ins *domain.Instance, kind, level
 // appendLogRaw 仅需实例的日志埋点(reaper/retry 路径,无 job 上下文)。
 func (s *Scheduler) appendLogRaw(ins *domain.Instance, kind, level, msg string) {
 	s.appendLog(nil, ins, kind, level, msg)
-}
-
-// computeNextRun 按 ScheduleKind 推算下次执行时间;manual/run_at 等一次性类型返回 nil(停止自动调度)。
-func computeNextRun(job *domain.Job, from time.Time) *time.Time {
-	switch job.ScheduleKind {
-	case "cron":
-		if n, err := schedtime.NextCron(job.ScheduleExpr, from); err == nil {
-			return &n
-		}
-	case "fix_rate", "fix_delay":
-		if ms, err := strconv.ParseInt(job.ScheduleExpr, 10, 64); err == nil && ms > 0 {
-			n := from.Add(time.Duration(ms) * time.Millisecond)
-			return &n
-		}
-	case "delay":
-		if sec, err := strconv.Atoi(job.ScheduleExpr); err == nil && sec > 0 {
-			n := from.Add(time.Duration(sec) * time.Second)
-			return &n
-		}
-	}
-	return nil
 }

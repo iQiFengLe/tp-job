@@ -74,3 +74,13 @@ func (s JobStore) AdvanceNextRun(jobID int64, oldNext time.Time, newNext *time.T
 	res := q.Update("next_run_time", *newNext)
 	return res.RowsAffected > 0, res.Error
 }
+
+// ListByIDs 批量按 id 查 job(reaper/retry 预加载用,消除逐实例 Get 的 N+1)。
+func (s JobStore) ListByIDs(ids []int64) ([]domain.Job, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var jobs []domain.Job
+	err := s.db.Where("id IN ?", ids).Find(&jobs).Error
+	return jobs, err
+}

@@ -1,7 +1,6 @@
 package dservice
 
 import (
-	"context"
 	"io"
 	"log/slog"
 	"net/http"
@@ -127,7 +126,7 @@ func TestJobTrigger(t *testing.T) {
 	mw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
 	defer mw.Close()
 	// 注意:此 sch 的 reg 无 worker,SubmitManual 仍会落 queued 实例
-	if err := jobSvc.Trigger(context.Background(), app.ID, job.ID, 5, "iparams"); err != nil {
+	if err := jobSvc.Trigger(app.ID, job.ID, 5, "iparams"); err != nil {
 		t.Fatal(err)
 	}
 	var queued []domain.Instance

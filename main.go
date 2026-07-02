@@ -99,18 +99,17 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 启动清理:把重启前未终结(waiting_receive/running)的实例标 failed(worker 上下文随进程退出丢失)。
-	// 失败重试是 DB 驱动(next_retry_time + RetryPump),重启不丢,无需 recoverRetries 补丁。
-	if n, err := st.Instance.MarkStaleActiveAsFailed("服务重启前未完成"); err != nil {
+	// 启动清理:把重启前未终结(waiting_receive/running)的实例做失败转移(UpdateResult(failed)
+	// + scheduleRetry)。有重试余力的实例设 next_retry_time 由 RetryPump 接管重派——重启不丢,
+	// 取代旧 MarkStaleActiveAsFailed 的 bulk 标记(旧版不衔接重试,在飞实例被静默放弃)。
+	if err := sch.RecoverStaleActive(); err != nil {
 		log.Error("清理僵尸实例失败", "err", err)
-	} else if n > 0 {
-		log.Info("已清理重启前未终结的实例", "count", n)
 	}
 
-	// 恢复重启前排队的手动实例:手动优先队列是纯内存,重启即丢;queued 实例不被 reaper/RetryPump
-	// 捞,不恢复会永久滞留(违背 SubmitManual 落库即不丢的承诺)。
-	if err := sch.RecoverManualQueued(); err != nil {
-		log.Error("恢复 queued 手动实例失败", "err", err)
+	// 恢复重启前排队的实例(任意 trigger_type):优先队列是纯内存,重启即丢;queued 实例不被
+	// reaper/RetryPump 捞,不恢复会永久滞留(违背 SubmitManual 落库即不丢的承诺)。
+	if err := sch.RecoverQueued(); err != nil {
+		log.Error("恢复 queued 实例失败", "err", err)
 	}
 
 	// 鉴权:会话 store + 登录服务(管理员配置 + app 表)
@@ -140,13 +139,15 @@ func main() {
 		cfg: cfg, st: st,
 		appSvc: appSvc, jobSvc: jobSvc, insSvc: insSvc,
 		reg: reg, il: il, authStore: authStore, loginSvc: loginSvc,
-		ctx: ctx, webFS: webFS,
+		webFS: webFS,
 	})
 	httpSrv := &http.Server{
-		Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler:      handler,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 60 * time.Second,
+		Addr:              fmt.Sprintf(":%d", cfg.Server.Port),
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second, // 慢首部(Slowloris)前置拦截
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	go func() {
@@ -187,7 +188,6 @@ type routerDeps struct {
 	il        *instancelog.Logger
 	authStore *auth.Store
 	loginSvc  *auth.LoginService
-	ctx       context.Context
 	webFS     fs.FS
 }
 

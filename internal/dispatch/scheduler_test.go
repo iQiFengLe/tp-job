@@ -98,17 +98,15 @@ func TestSchedulerDispatchesToWorker(t *testing.T) {
 		return ok
 	}, "等待 worker 收到 runJob")
 
-	// DB 里应有 waiting_receive 实例,绑定 worker
-	list, err := st.Instance.ListGeneralizedActive()
-	if err != nil || len(list) != 1 {
-		t.Fatalf("应 1 个在飞实例, got %d err=%v", len(list), err)
-	}
-	if list[0].Status != domain.StatusWaitingReceive {
-		t.Fatalf("应为 waiting_receive, got %s", list[0].Status)
-	}
-	if list[0].WorkerAddress == "" || list[0].Tag != "t1" {
-		t.Fatalf("实例应绑 worker + tag, got %+v", list[0])
-	}
+	// DB 里应有 waiting_receive 实例,绑定 worker。
+	// dispatch 的"POST 成功 → UpdateStatus(waiting_receive)"与 worker 收到 POST 之间存在窗口,
+	// 单次查询会撞上中间态(running/queued)致 flaky,故用 waitFor 轮询全部断言条件。
+	var list []domain.Instance
+	waitFor(t, 3*time.Second, func() bool {
+		list, _ = st.Instance.ListGeneralizedActive(0)
+		return len(list) == 1 && list[0].Status == domain.StatusWaitingReceive &&
+			list[0].WorkerAddress != "" && list[0].Tag == "t1"
+	}, "应 1 个 waiting_receive 实例并绑 worker+tag")
 	insID = list[0].ID
 	_ = insID
 }
@@ -142,7 +140,7 @@ func TestSchedulerCronSerial(t *testing.T) {
 
 	// 跑多个 tick,期间实例始终在飞(worker 不回报),应只产生 1 个实例
 	time.Sleep(350 * time.Millisecond)
-	list, _ := st.Instance.ListGeneralizedActive()
+	list, _ := st.Instance.ListGeneralizedActive(0)
 	if len(list) != 1 {
 		t.Fatalf("串行期应只 1 个在飞实例, got %d", len(list))
 	}
@@ -151,7 +149,7 @@ func TestSchedulerCronSerial(t *testing.T) {
 	sch.ReleaseInFlight(list[0].ID)
 	time.Sleep(20 * time.Millisecond)
 	waitFor(t, 2*time.Second, func() bool {
-		l, _ := st.Instance.ListGeneralizedActive()
+		l, _ := st.Instance.ListGeneralizedActive(0)
 		return len(l) >= 2 // 释放后下个 tick 又派一个
 	}, "释放后应继续派发")
 }
@@ -245,9 +243,9 @@ func TestRetryPump(t *testing.T) {
 	}
 }
 
-// RecoverManualQueued:重启前残留的 queued 手动实例,启动恢复后重新入队并被派发。
+// RecoverQueued:重启前残留的 queued 实例,启动恢复后重新入队并被派发。
 // 覆盖"pq 纯内存、重启即丢、queued 无其他兜底"的修复。
-func TestRecoverManualQueued(t *testing.T) {
+func TestRecoverQueued(t *testing.T) {
 	st := newTestStore(t)
 	mw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
 	defer mw.Close()
@@ -271,7 +269,7 @@ func TestRecoverManualQueued(t *testing.T) {
 	if n := sch.pendingLen(); n != 0 {
 		t.Fatalf("恢复前 pq 应为空, got %d", n)
 	}
-	if err := sch.RecoverManualQueued(); err != nil {
+	if err := sch.RecoverQueued(); err != nil {
 		t.Fatalf("恢复失败: %v", err)
 	}
 	if n := sch.pendingLen(); n != 2 {
@@ -284,7 +282,73 @@ func TestRecoverManualQueued(t *testing.T) {
 	go sch.RunManualDispatcher(ctx)
 
 	waitFor(t, 3*time.Second, func() bool {
-		list, _ := st.Instance.ListGeneralizedActive()
+		list, _ := st.Instance.ListGeneralizedActive(0)
 		return len(list) == 2
 	}, "恢复的 2 个 queued 实例应都被派发")
+}
+
+// RecoverStaleActive:重启前未终结的实例,启动清理后 failed;配了重试的设 next_retry_time 交
+// RetryPump 重派(重启不丢),取代旧 MarkStaleActiveAsFailed 的"只标 failed 不重试"。
+func TestRecoverStaleActiveRetry(t *testing.T) {
+	st := newTestStore(t)
+	il := instancelog.New(t.TempDir(), 0)
+	sch := NewScheduler(st, New(workerreg.New(time.Minute, nil), time.Second), il,
+		50*time.Millisecond, discardLog())
+
+	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
+	// job 配了 1 次重试
+	_ = st.Job.Create(&domain.Job{ID: 1, AppID: 1, Name: "j", ExecuteType: "http",
+		RetryCount: 1, RetryIntervalSec: 1})
+	// 重启前未终结的实例
+	ins := &domain.Instance{JobID: 1, AppID: 1, Status: domain.StatusWaitingReceive,
+		WorkerAddress: "1.2.3.4:5", RetryIndex: 0}
+	_ = st.Instance.Create(ins)
+
+	if err := sch.RecoverStaleActive(); err != nil {
+		t.Fatalf("RecoverStaleActive 失败: %v", err)
+	}
+	got, _ := st.Instance.Get(ins.ID)
+	if got.Status != domain.StatusFailed {
+		t.Fatalf("应标 failed, got %s", got.Status)
+	}
+	if got.NextRetryTime == nil {
+		t.Fatal("有重试余力应设 next_retry_time(交 RetryPump 重派,重启不丢)")
+	}
+}
+
+// RecoverQueued 扫所有 trigger_type 的 queued(manual 已由 TestRecoverQueued 覆盖,
+// 此处补 auto/retry:模拟 Create(queued) 与 Dispatch 之间崩溃残留的实例,启动后应被恢复派发)。
+func TestRecoverQueuedAllTypes(t *testing.T) {
+	st := newTestStore(t)
+	mw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	defer mw.Close()
+	reg := workerreg.New(time.Minute, nil)
+	reg.Heartbeat(workerreg.WorkerInfo{AppID: 1, WorkerAddress: mw.Listener.Addr().String(),
+		Metrics: domain.SystemMetrics{Score: 1}, Protocol: workerreg.ProtocolHTTP, AcceptNotTagJob: true})
+
+	il := instancelog.New(t.TempDir(), 0)
+	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog())
+
+	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
+	_ = st.Job.Create(&domain.Job{ID: 1, AppID: 1, Name: "j", ExecuteType: "http", MaxConcurrency: 5})
+
+	// auto/retry 触发路径崩溃残留的 queued 实例(旧 RecoverManualQueued 不捞,会永久滞留)
+	_ = st.Instance.Create(&domain.Instance{JobID: 1, AppID: 1, Status: domain.StatusQueued, TriggerType: "auto"})
+	_ = st.Instance.Create(&domain.Instance{JobID: 1, AppID: 1, Status: domain.StatusQueued,
+		TriggerType: "retry", RetryIndex: 1})
+
+	if err := sch.RecoverQueued(); err != nil {
+		t.Fatalf("RecoverQueued 失败: %v", err)
+	}
+	if n := sch.pendingLen(); n != 2 {
+		t.Fatalf("应恢复 2 个(auto+retry) queued 实例, got %d", n)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go sch.RunManualDispatcher(ctx)
+	waitFor(t, 3*time.Second, func() bool {
+		list, _ := st.Instance.ListGeneralizedActive(0)
+		return len(list) == 2
+	}, "auto/retry 的 queued 实例应都被恢复派发")
 }

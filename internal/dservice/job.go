@@ -1,7 +1,6 @@
 package dservice
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -193,10 +192,10 @@ func (s *JobService) List(appID int64, page, size int) ([]domain.Job, int64, err
 
 // Trigger 手动触发:经 SubmitManual 入优先队列,受 MaxConcurrency 限制。
 // 落库失败时透传 SubmitManual 的 error,供调用方据实响应,而非空报 triggered。
-func (s *JobService) Trigger(ctx context.Context, appID, id int64, priority int, instanceParams string) error {
+func (s *JobService) Trigger(appID, id int64, priority int, instanceParams string) error {
 	job, err := s.Get(appID, id)
 	if err != nil {
 		return err
 	}
-	return s.sch.SubmitManual(ctx, job, priority, instanceParams)
+	return s.sch.SubmitManual(job, priority, instanceParams)
 }
