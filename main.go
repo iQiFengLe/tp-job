@@ -125,13 +125,14 @@ func main() {
 	jobSvc := dservice.NewJobService(st, sch)
 	insSvc := dservice.NewInstanceService(st, sch, il)
 
-	// 后台循环:定时调度 + 手动派发 + 失败转移 reaper + DB 重试 pump + worker 清理 + 会话清理
+	// 后台循环:定时调度 + 手动派发 + 失败转移 reaper + DB 重试 pump + worker 清理 + 会话清理 + 实例日志清理
 	go sch.Run(ctx)
 	go sch.RunManualDispatcher(ctx)
 	go sch.RunInstanceReaper(ctx, reg)
 	go sch.RunRetryPump(ctx)
 	go reg.Run(ctx)
 	go authStore.Run(ctx)
+	go il.Run(ctx)
 
 	// HTTP 服务
 	webFS := resolveWebFS()

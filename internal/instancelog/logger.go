@@ -8,6 +8,7 @@
 package instancelog
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -169,6 +170,32 @@ func (l *Logger) Sweep(now time.Time) int {
 		return nil
 	})
 	return removed
+}
+
+// Run 周期清理过期实例日志(retention>0 时);retention<=0 时 no-op(不清理,立即返回)。
+// 间隔取 retention/2(下限 1h、上限 24h):retention=7d→每天扫;retention=2h→每 2h 扫。
+// 装配层应 `go il.Run(ctx)`。Sweep 按 mtime 删旧文件并回收 per-file 锁条目。
+func (l *Logger) Run(ctx context.Context) {
+	if l.retention <= 0 {
+		return
+	}
+	interval := l.retention / 2
+	if interval > 24*time.Hour {
+		interval = 24 * time.Hour
+	}
+	if interval < time.Hour {
+		interval = time.Hour
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			l.Sweep(time.Now())
+		}
+	}
 }
 
 func paginate(lines []string, q LogQuery) ([]string, int, error) {
