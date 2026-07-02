@@ -73,6 +73,7 @@ type PowerJob struct {
 type Auth struct {
 	Admins  []AdminAccount `yaml:"admins"`  // 管理员账户(配置注入,不入库)
 	Session SessionConfig  `yaml:"session"` // 登录会话参数
+	Login   LoginConfig    `yaml:"login"`   // 登录端点限流(防爆破 + bcrypt DoS)
 }
 
 // AdminAccount 管理员账户。Password 为 bcrypt 哈希;env TASK_SCHEDULE_ADMIN_PASSWORD
@@ -85,6 +86,12 @@ type AdminAccount struct {
 // SessionConfig 登录会话参数。
 type SessionConfig struct {
 	TTLSeconds int `yaml:"ttl_seconds"` // 会话有效期(秒);默认 86400(24h)
+}
+
+// LoginConfig 登录端点限流参数。bcrypt 单次校验耗时较高,无限流时登录端点可被当作
+// 资源放大型 DoS(海量请求消耗 CPU);同时为密码爆破设一道 IP 级闸门。
+type LoginConfig struct {
+	MaxAttemptsPerMin int `yaml:"max_attempts_per_min"` // 每 IP 每分钟最大尝试次数;0=不限(默认,向后兼容)
 }
 
 // 默认管理员占位凭据(开发便利):applyDefaults 在 Admins 为空时种入;release 防呆拒绝之。
@@ -249,6 +256,11 @@ func (a *Auth) Validate(release bool) error {
 			return fmt.Errorf("管理员用户名重复: %s", ad.Username)
 		}
 		seen[ad.Username] = true
+	}
+	// 登录端点限流:bcrypt 单次校验耗 CPU,无限流时登录端点可被当作资源放大型 DoS,亦可被密码爆破。
+	// release 模式拒不开箱裸奔(同"拒默认密码"约定),强制运维显式配置(建议 10~20)。
+	if a.Login.MaxAttemptsPerMin <= 0 {
+		return errors.New("release 模式必须显式配置 auth.login.max_attempts_per_min(登录限流,防爆破+bcrypt DoS;建议 10~20)")
 	}
 	return nil
 }

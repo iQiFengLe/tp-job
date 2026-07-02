@@ -49,6 +49,10 @@ auth:
   #     password: "$2a$10$...."   # bcrypt 哈希
   session:
     ttl_seconds: 86400   # 登录会话有效期(秒)
+  # 登录限流(防爆破 + bcrypt 资源放大 DoS)。每 IP 每分钟最大尝试次数;0=不限(开发默认)。
+  # 生产建议设 10~20。release 模式强制要求显式配置(<=0 启动被拒,同"拒默认密码"防呆)。
+  # login:
+  #   max_attempts_per_min: 10
 
 # 环境变量(优先级高于本文件,便于容器/CI 注入,避免明文落盘):
 #   TASK_SCHEDULE_ADMIN_USERNAME          → auth.admins[0].username

@@ -201,17 +201,21 @@ type routerDeps struct {
 func buildRouter(d routerDeps) *gin.Engine {
 	gin.SetMode(d.cfg.Server.Mode)
 	r := gin.New()
+	// 不信任任何代理:gin 默认信任 0.0.0.0/0,会从客户端可伪造的 X-Forwarded-For 取 ClientIP,
+	// 使登录限流(以 ClientIP 为 key)被换头绕过。nil 后 ClientIP 退回 TCP 源地址(RemoteAddr),
+	// 不可伪造。若日后部署在受信反代后且需按真实客户端 IP 限流,改为反代网段列表。
+	r.SetTrustedProxies(nil)
 	r.Use(gin.Recovery(), bodyLimit(d.cfg.Server.MaxRequestBodyMB))
 
-	r.GET("/health", func(c *gin.Context) { health(c, d.st, d.cfg) })
+	r.GET("/health", func(c *gin.Context) { health(c, d.st) })
 
 	// /api:登录公开;me/logout 与资源路由各自前置 SessionAuth(在 own 内部按矩阵挂)。
 	api := r.Group("/api")
-	api.POST("/auth/login", own.LoginHandler(d.loginSvc))
+	api.POST("/auth/login", own.LoginRateLimit(d.cfg.Auth.Login.MaxAttemptsPerMin), own.LoginHandler(d.loginSvc))
 	own.RegisterAuth(api, d.authStore)
 	own.Register(api, own.Deps{
 		Apps: d.appSvc, Jobs: d.jobSvc, Instances: d.insSvc,
-		Store: d.st, Ctx: d.ctx, Auth: d.authStore, Reg: d.reg,
+		Store: d.st, Auth: d.authStore, Reg: d.reg,
 	})
 
 	// /worker:简化 http worker 协议(心跳/回报状态/回报日志),无鉴权。
@@ -229,15 +233,15 @@ func buildRouter(d routerDeps) *gin.Engine {
 	return r
 }
 
-// health 探活 DB:Ping 失败返回 503 degraded。不向匿名访问者泄露内网信息。
-func health(c *gin.Context, st *repository.Store, cfg *config.Config) {
+// health 探活 DB:Ping 失败返回 503 degraded。不向匿名访问者泄露内网信息(仅暴露 status)。
+func health(c *gin.Context, st *repository.Store) {
 	status, httpStatus := "ok", 200
 	if sqlDB, err := st.DB.DB(); err != nil {
 		status, httpStatus = "degraded", 503
 	} else if err := sqlDB.Ping(); err != nil {
 		status, httpStatus = "degraded", 503
 	}
-	c.JSON(httpStatus, gin.H{"code": 0, "msg": "ok", "data": gin.H{"status": status, "driver": cfg.Database.Driver}})
+	c.JSON(httpStatus, gin.H{"code": 0, "msg": "ok", "data": gin.H{"status": status}})
 }
 
 // bodyLimit 限制请求体大小,防止超大 JSON 打爆内存。

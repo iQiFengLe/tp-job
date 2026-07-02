@@ -2,6 +2,7 @@ package own
 
 import (
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -79,5 +80,80 @@ func logoutHandler(store *auth.Store) gin.HandlerFunc {
 		sess, _ := auth.SessionFrom(c)
 		store.Delete(sess.Token)
 		ok(c, gin.H{"logged_out": true})
+	}
+}
+
+// ===== 登录限流 =====
+//
+// 登录端点公开可达,且每次校验触发 bcrypt(耗时)。无闸门时既可被密码爆破,也可被当作
+// 资源放大型 DoS(海量登录请求持续占 CPU)。此处用每 IP 固定窗口限流,超限返 429。
+// max<=0 时关闭(向后兼容;生产建议 10~20)。固定窗口对本场景够用:误伤面小、实现无依赖。
+
+// loginRateLimiter 每 IP 固定窗口计数器。window 内最多 max 次尝试。
+type loginRateLimiter struct {
+	window time.Duration
+	max    int
+	mu     sync.Mutex
+	hits   map[string]*loginWin
+}
+
+type loginWin struct {
+	n     int
+	start time.Time
+}
+
+// newLoginRateLimiter max<=0 返回 nil(表示不限流,nil.allow 恒放行)。否则启动后台回收。
+func newLoginRateLimiter(maxPerMin int) *loginRateLimiter {
+	if maxPerMin <= 0 {
+		return nil
+	}
+	l := &loginRateLimiter{window: time.Minute, max: maxPerMin, hits: map[string]*loginWin{}}
+	go l.reapLoop()
+	return l
+}
+
+// allow nil 接收者恒放行(未启用限流);否则按 IP 固定窗口计数,超限拒绝。
+func (l *loginRateLimiter) allow(ip string) bool {
+	if l == nil {
+		return true
+	}
+	now := time.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	w, ok := l.hits[ip]
+	if !ok || now.Sub(w.start) >= l.window {
+		l.hits[ip] = &loginWin{n: 1, start: now}
+		return true
+	}
+	w.n++
+	return w.n <= l.max
+}
+
+// reapLoop 周期回收过期窗口条目,避免长期 churn 下 hits map 无限增长。随进程退出终止。
+func (l *loginRateLimiter) reapLoop() {
+	t := time.NewTicker(l.window)
+	defer t.Stop()
+	for range t.C {
+		cutoff := time.Now().Add(-l.window)
+		l.mu.Lock()
+		for ip, w := range l.hits {
+			if w.start.Before(cutoff) {
+				delete(l.hits, ip)
+			}
+		}
+		l.mu.Unlock()
+	}
+}
+
+// LoginRateLimit 登录端点 IP 限流中间件。maxPerMin<=0 时 no-op(不限流,直接放行)。
+func LoginRateLimit(maxPerMin int) gin.HandlerFunc {
+	rl := newLoginRateLimiter(maxPerMin)
+	return func(c *gin.Context) {
+		if !rl.allow(c.ClientIP()) {
+			c.AbortWithStatusJSON(http.StatusTooManyRequests,
+				gin.H{"code": http.StatusTooManyRequests, "msg": "登录尝试过于频繁,请稍后再试"})
+			return
+		}
+		c.Next()
 	}
 }

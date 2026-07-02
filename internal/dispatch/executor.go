@@ -42,8 +42,15 @@ func New(reg *workerreg.Registry, dispatchTimeout time.Duration) *Executor {
 		dispatchTimeout = 10 * time.Second
 	}
 	return &Executor{
-		reg:    reg,
-		client: &http.Client{Timeout: dispatchTimeout},
+		reg: reg,
+		client: &http.Client{
+			Timeout: dispatchTimeout,
+			// 禁止跟随重定向:worker 接收端不应 302,否则可被诱导 POST 到内网元数据/内部端点,
+			// 绕过 worker.allowed_cidrs 的注册期校验(SSRF 纵深防御缺口)。返回原响应即可。
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}
 }
 

@@ -67,7 +67,9 @@ func TestValidateReleaseCases(t *testing.T) {
 			{Username: "a", Password: validHash},
 			{Username: "a", Password: validHash},
 		}}, true},
-		{"合法", Auth{Admins: []AdminAccount{{Username: "admin", Password: validHash}}}, false},
+		{"合法", Auth{Admins: []AdminAccount{{Username: "admin", Password: validHash}},
+			Login: LoginConfig{MaxAttemptsPerMin: 10}}, false},
+		{"release 未配登录限流", Auth{Admins: []AdminAccount{{Username: "admin", Password: validHash}}}, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
