@@ -1,6 +1,7 @@
 # 构建产物
 /task-schedule
 /task-schedule.exe
+/task-schedule-linux-*
 *.exe
 /web/dist/
 /web/node_modules/
