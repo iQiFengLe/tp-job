@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -172,5 +174,195 @@ func TestQueryJobCluster(t *testing.T) {
 	_ = json.Unmarshal(raw, &addrs)
 	if len(addrs) != 2 {
 		t.Fatalf("应返回 2 个 worker 地址, got %v", addrs)
+	}
+}
+
+func newOpenApiDeps(t *testing.T) (OpenApiDeps, *repository.Store) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "t.db")), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if sqlDB, err := db.DB(); err == nil {
+			_ = sqlDB.Close()
+		}
+	})
+	st, err := repository.FromDB(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := workerreg.New(time.Minute, nil)
+	il := instancelog.New(t.TempDir(), 0)
+	sch := dispatch.NewScheduler(st, dispatch.New(reg, time.Second), il, 50*time.Millisecond, discardLog())
+	return OpenApiDeps{
+		Jobs:      dservice.NewJobService(st, sch),
+		Instances: dservice.NewInstanceService(st, sch, il),
+		Apps:      dservice.NewAppService(st),
+		Store:     st,
+	}, st
+}
+
+// /openApi/runJob:PowerJob OpenAPI 兼容——form 触发,返回 ResultDTO<Long>;Content-Type 必须是 JSON。
+func TestOpenApiRunJob(t *testing.T) {
+	d, st := newOpenApiDeps(t)
+	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
+	_ = st.Job.Create(&domain.Job{ID: 1, AppID: 1, Name: "j", ExecuteType: "http", ScheduleKind: "manual", Enabled: true})
+
+	post := func(body string) *httptest.ResponseRecorder {
+		g := gin.New()
+		RegisterOpenApi(g.Group("/openApi"), d)
+		req := httptest.NewRequest("POST", "/openApi/runJob", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		w := httptest.NewRecorder()
+		g.ServeHTTP(w, req)
+		return w
+	}
+
+	// 正常触发 → success + instanceId + Content-Type: json
+	w := post("appId=1&jobId=1&instanceParams=demo&delayMS=0")
+	if w.Code != 200 {
+		t.Fatalf("应 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "json") {
+		t.Fatalf("Content-Type 应含 json(客户端 JsonResponseHandler 拒 text/html), got %s", ct)
+	}
+	var resp ResultDTO
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("应解析为 JSON: %v body=%s", err, w.Body.String())
+	}
+	if !resp.Success {
+		t.Fatalf("应 success: %+v", resp)
+	}
+	instanceID := int64(resp.Data.(float64))
+	if instanceID <= 0 {
+		t.Fatalf("应返回正 instanceId, got %v", resp.Data)
+	}
+	ins, _ := st.Instance.Get(instanceID)
+	if ins == nil || ins.JobID != 1 || ins.JobInstanceParams != "demo" {
+		t.Fatalf("实例应已创建并回填参数: %+v", ins)
+	}
+
+	// jobId 不属于 appId(越权防护)→ fail;缺 appId → fail
+	var fail ResultDTO
+	_ = json.Unmarshal(post("appId=999&jobId=1&delayMS=0").Body.Bytes(), &fail)
+	if fail.Success {
+		t.Fatal("不存在的 appId/jobId 应 fail")
+	}
+	_ = json.Unmarshal(post("jobId=1&delayMS=0").Body.Bytes(), &fail)
+	if fail.Success {
+		t.Fatal("缺 appId 应 fail")
+	}
+}
+
+// 综合覆盖:assertApp → saveJob(create) → fetchJob → runJob → fetchInstanceStatus → cancelInstance。
+func TestOpenApiJobInstance(t *testing.T) {
+	d, st := newOpenApiDeps(t)
+	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
+
+	g := gin.New()
+	RegisterOpenApi(g.Group("/openApi"), d)
+	call := func(path, body string) *httptest.ResponseRecorder {
+		var r io.Reader
+		if body != "" {
+			r = strings.NewReader(body)
+		}
+		req := httptest.NewRequest("POST", "/openApi/"+path, r)
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		w := httptest.NewRecorder()
+		g.ServeHTTP(w, req)
+		return w
+	}
+	callJSON := func(path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/openApi/"+path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		g.ServeHTTP(w, req)
+		return w
+	}
+	var resp ResultDTO
+
+	// assertApp → appId
+	_ = json.Unmarshal(call("assert", "appName=a").Body.Bytes(), &resp)
+	if !resp.Success || int64(resp.Data.(float64)) != 1 {
+		t.Fatalf("assertApp 应 success 且 appId=1: %+v", resp)
+	}
+
+	// saveJob(create,cron) → jobId
+	_ = json.Unmarshal(callJSON("saveJob", `{"appId":1,"jobName":"j1","timeExpressionType":2,"timeExpression":"*/1 * * * *","enable":true}`).Body.Bytes(), &resp)
+	if !resp.Success {
+		t.Fatalf("saveJob create 应 success: %+v", resp)
+	}
+	jobID := int64(resp.Data.(float64))
+
+	// fetchJob → JobInfoDTO(timeExpressionType 应=2 CRON)
+	_ = json.Unmarshal(call("fetchJob", "appId=1&jobId="+strconv.FormatInt(jobID, 10)).Body.Bytes(), &resp)
+	if !resp.Success {
+		t.Fatalf("fetchJob 应 success: %+v", resp)
+	}
+
+	// runJob → instanceId
+	_ = json.Unmarshal(call("runJob", "appId=1&jobId="+strconv.FormatInt(jobID, 10)+"&delayMS=0").Body.Bytes(), &resp)
+	if !resp.Success {
+		t.Fatalf("runJob 应 success: %+v", resp)
+	}
+	instanceID := int64(resp.Data.(float64))
+
+	// fetchInstanceStatus → 数字码 queued=1
+	_ = json.Unmarshal(call("fetchInstanceStatus", "instanceId="+strconv.FormatInt(instanceID, 10)).Body.Bytes(), &resp)
+	if !resp.Success || int(resp.Data.(float64)) != WireWaitingDispatch {
+		t.Fatalf("fetchInstanceStatus 应 success 且 queued=1: %+v", resp)
+	}
+
+	// cancelInstance → success;实例变 canceled
+	_ = json.Unmarshal(call("cancelInstance", "instanceId="+strconv.FormatInt(instanceID, 10)).Body.Bytes(), &resp)
+	if !resp.Success {
+		t.Fatalf("cancelInstance 应 success: %+v", resp)
+	}
+	ins, _ := st.Instance.Get(instanceID)
+	if ins.Status != domain.StatusCanceled {
+		t.Fatalf("实例应 canceled, got %s", ins.Status)
+	}
+}
+
+// saveJob 更新非 schedule 字段时校验 job 归属 app:跨 app 改名应 fail。
+// 回归:Jobs.Update 仅在 schedule 字段变化时经 Get 带 app_id 校验,改 name 等会直达
+// JobStore.Update(只按 id)——openapi saveJob 更新分支补 jobBelongToApp 后应拦截此越权。
+func TestOpenApiSaveJobUpdateCrossAppDenied(t *testing.T) {
+	d, st := newOpenApiDeps(t)
+	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
+	_ = st.App.Create(&domain.App{ID: 2, AppName: "b"})
+	_ = st.Job.Create(&domain.Job{ID: 1, AppID: 1, Name: "j", ExecuteType: "http", Enabled: true})
+
+	g := gin.New()
+	RegisterOpenApi(g.Group("/openApi"), d)
+	doPost := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/openApi/saveJob", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		g.ServeHTTP(w, req)
+		return w
+	}
+
+	// appId=2 改 app1 的 job1 的名字(只改 name,非 schedule 字段)→ 应 fail
+	var resp ResultDTO
+	_ = json.Unmarshal(doPost(`{"id":1,"appId":2,"jobName":"hacked"}`).Body.Bytes(), &resp)
+	if resp.Success {
+		t.Fatal("跨 app 改非 schedule 字段应 fail(越权)")
+	}
+	j, _ := st.Job.Get(1, 1)
+	if j.Name != "j" {
+		t.Fatalf("job 名不应被越权修改, got %q", j.Name)
+	}
+
+	// 自家 app1 改名应 success
+	_ = json.Unmarshal(doPost(`{"id":1,"appId":1,"jobName":"renamed"}`).Body.Bytes(), &resp)
+	if !resp.Success {
+		t.Fatalf("自家 app 改名应 success: %+v", resp)
+	}
+	j, _ = st.Job.Get(1, 1)
+	if j.Name != "renamed" {
+		t.Fatalf("job 名应已改为 renamed, got %q", j.Name)
 	}
 }

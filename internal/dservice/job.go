@@ -199,3 +199,13 @@ func (s *JobService) Trigger(appID, id int64, priority int, instanceParams strin
 	}
 	return s.sch.SubmitManual(job, priority, instanceParams)
 }
+
+// TriggerReturnInstance 同 Trigger,但返回创建的实例 ID 并支持 delayMS 延迟(对齐 PowerJob OpenAPI
+// runJob):外部业务客户端需立即拿到 instanceId 追踪执行;delayMS>0 时立即返回 ID、延迟到点派发。
+func (s *JobService) TriggerReturnInstance(appID, id int64, priority int, instanceParams string, delayMS int64) (int64, error) {
+	job, err := s.Get(appID, id)
+	if err != nil {
+		return 0, err
+	}
+	return s.sch.SubmitManualDelayed(job, priority, instanceParams, time.Duration(delayMS)*time.Millisecond)
+}

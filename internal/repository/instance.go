@@ -42,12 +42,13 @@ func (s InstanceStore) MarkDispatched(id int64, workerAddress string) error {
 
 // InstanceFilter 实例列表过滤。
 type InstanceFilter struct {
-	AppID  int64
-	JobID  int64
-	Status string
-	RootID int64 // 按归属分组过滤(可选)
-	Page   int
-	Size   int
+	AppID    int64
+	JobID    int64
+	Status   string
+	StatusIn []string // 多状态 OR 查询(非空时与 Status 叠加)
+	RootID   int64    // 按归属分组过滤(可选)
+	Page     int
+	Size     int
 }
 
 // List 按过滤条件分页查询(按 created_at DESC)。
@@ -63,6 +64,9 @@ func (s InstanceStore) List(f InstanceFilter) ([]domain.Instance, int64, error) 
 	}
 	if f.Status != "" {
 		q = q.Where("status = ?", f.Status)
+	}
+	if len(f.StatusIn) > 0 {
+		q = q.Where("status IN ?", f.StatusIn)
 	}
 	if f.RootID > 0 {
 		q = q.Where("root_instance_id = ?", f.RootID)

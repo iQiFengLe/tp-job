@@ -175,3 +175,39 @@ func TestListWorkersNilReg(t *testing.T) {
 }
 
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
+
+// 越权防护回归:getInstance / instanceLogs 用 :iid 时校验归属 :appId,跨 app 读取应 404。
+// 覆盖 GetInApp/LogsInApp——AppScope 中间件只校验路径 :appId,实例归属在此补齐。
+func TestOwnInstanceCrossAppDenied(t *testing.T) {
+	d, _ := newDeps(t)
+
+	wa1 := req(t, "POST", "/api/apps", CreateAppReq{AppName: "a1", Password: "p"}, d)
+	a1 := int64(bodyData(t, wa1)["data"].(map[string]any)["id"].(float64))
+	wa2 := req(t, "POST", "/api/apps", CreateAppReq{AppName: "a2", Password: "p"}, d)
+	a2 := int64(bodyData(t, wa2)["data"].(map[string]any)["id"].(float64))
+
+	wj := req(t, "POST", "/api/apps/"+itoa(a1)+"/jobs", CreateJobReq{Name: "j", ScheduleKind: "manual"}, d)
+	jobID := int64(bodyData(t, wj)["data"].(map[string]any)["id"].(float64))
+
+	// 手动触发 → app1 名下 1 个 queued 实例(SubmitManual 落库即返回,不依赖调度循环)
+	req(t, "POST", "/api/apps/"+itoa(a1)+"/jobs/"+itoa(jobID)+"/trigger", nil, d)
+	wl := req(t, "GET", "/api/apps/"+itoa(a1)+"/instances", nil, d)
+	list := bodyData(t, wl)["data"].(map[string]any)["list"].([]any)
+	if len(list) != 1 {
+		t.Fatalf("app1 应 1 个实例, got %d", len(list))
+	}
+	insID := int64(list[0].(map[string]any)["id"].(float64))
+
+	// 自家 app1 读取实例:200
+	if w := req(t, "GET", "/api/apps/"+itoa(a1)+"/instances/"+itoa(insID), nil, d); w.Code != http.StatusOK {
+		t.Fatalf("自家 app 读取实例应 200, got %d: %s", w.Code, w.Body.String())
+	}
+	// 跨 app(a2) 读取 app1 的实例:应 404(防身份枚举,非 403)
+	if w := req(t, "GET", "/api/apps/"+itoa(a2)+"/instances/"+itoa(insID), nil, d); w.Code != http.StatusNotFound {
+		t.Fatalf("跨 app 读取实例应 404, got %d: %s", w.Code, w.Body.String())
+	}
+	// 跨 app 读日志:同样 404
+	if w := req(t, "GET", "/api/apps/"+itoa(a2)+"/instances/"+itoa(insID)+"/logs", nil, d); w.Code != http.StatusNotFound {
+		t.Fatalf("跨 app 读日志应 404, got %d: %s", w.Code, w.Body.String())
+	}
+}

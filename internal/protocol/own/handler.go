@@ -261,7 +261,9 @@ func (d Deps) listInstances(c *gin.Context) {
 }
 
 func (d Deps) getInstance(c *gin.Context) {
-	ins, err := d.Instances.Get(paramInt64(c, "iid"))
+	// 经 GetInApp 校验实例归属 :appId,防 app 角色越权读其他 app 实例
+	// (AppScope 只校验 :appId 路径参数,不校验 :iid 归属)。
+	ins, err := d.Instances.GetInApp(paramInt64(c, "appId"), paramInt64(c, "iid"))
 	if err != nil {
 		fail(c, notFoundStatus(err), err.Error())
 		return
@@ -273,7 +275,7 @@ func (d Deps) instanceLogs(c *gin.Context) {
 	group := c.Query("group") == "1"
 	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "500"))
-	lines, total, err := d.Instances.Logs(paramInt64(c, "iid"), dservice.LogQuery{
+	lines, total, err := d.Instances.LogsInApp(paramInt64(c, "appId"), paramInt64(c, "iid"), dservice.LogQuery{
 		Group: group, Offset: offset, Limit: limit,
 	})
 	if err != nil {

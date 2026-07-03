@@ -316,7 +316,35 @@ func TestRecoverStaleActiveRetry(t *testing.T) {
 	}
 }
 
-// RecoverQueued 扫所有 trigger_type 的 queued(manual 已由 TestRecoverQueued 覆盖,
+// retryInstance 派发失败(无 worker)若仍有重试余力,应继续重试(交 RetryPump),而非定格 failed。
+// 回归:原实现派发失败直接 failed 终态,重试链因一次瞬时派发失败被提前耗光(停在 retry_index=1)。
+func TestRetryDispatchFailContinues(t *testing.T) {
+	st := newTestStore(t)
+	reg := workerreg.New(time.Minute, nil) // 无 worker → 每次派发必失败
+	il := instancelog.New(t.TempDir(), 0)
+	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog())
+
+	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
+	// RetryCount=2:允许 0→1→2
+	_ = st.Job.Create(&domain.Job{ID: 1, AppID: 1, Name: "j", ExecuteType: "http",
+		RetryCount: 2, RetryIntervalSec: 1})
+
+	orig := &domain.Instance{JobID: 1, AppID: 1, Status: domain.StatusFailed, RetryIndex: 0}
+	_ = st.Instance.Create(orig)
+	_ = st.Instance.SetNextRetryTime(orig.ID, time.Now().Add(-time.Second))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go sch.RunRetryPump(ctx)
+
+	// 应推进到 retry_index=2(证明 index=1 派发失败后仍被重试;未修复时停在 1)
+	waitFor(t, 8*time.Second, func() bool {
+		var r2 []domain.Instance
+		st.DB.Where("retry_index = ?", 2).Find(&r2)
+		return len(r2) >= 1
+	}, "派发失败应继续重试至 retry_index=2")
+}
+
 // 此处补 auto/retry:模拟 Create(queued) 与 Dispatch 之间崩溃残留的实例,启动后应被恢复派发)。
 func TestRecoverQueuedAllTypes(t *testing.T) {
 	st := newTestStore(t)
@@ -351,4 +379,77 @@ func TestRecoverQueuedAllTypes(t *testing.T) {
 		list, _ := st.Instance.ListGeneralizedActive(0)
 		return len(list) == 2
 	}, "auto/retry 的 queued 实例应都被恢复派发")
+}
+
+// SubmitManualDelayed:返回 instanceID;delay=0 立即入队;delay>0 立即返回 ID 但延迟入队(对齐 OpenAPI runJob)。
+func TestSubmitManualDelayed(t *testing.T) {
+	st := newTestStore(t)
+	reg := workerreg.New(time.Minute, nil)
+	il := instancelog.New(t.TempDir(), 0)
+	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog())
+	t.Cleanup(func() { sch.stopTimers() }) // 取消 delay>0 的入队 timer,防测试结束后悬挂回调
+	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
+	_ = st.Job.Create(&domain.Job{ID: 1, AppID: 1, Name: "j"})
+	job, _ := st.Job.Get(1, 1)
+
+	// delay=0:立即返回 ID 并入队
+	id, err := sch.SubmitManualDelayed(job, 0, "p", 0)
+	if err != nil || id <= 0 {
+		t.Fatalf("应返回正 ID, err=%v", err)
+	}
+	if n := sch.pendingLen(); n != 1 {
+		t.Fatalf("delay=0 应立即入队(1), got %d", n)
+	}
+
+	// delay>0:立即返回 ID + 落库 queued,但不立即入队
+	id2, err := sch.SubmitManualDelayed(job, 0, "p", time.Hour)
+	if err != nil || id2 <= 0 {
+		t.Fatalf("应返回正 ID, err=%v", err)
+	}
+	ins, _ := st.Instance.Get(id2)
+	if ins == nil || ins.Status != domain.StatusQueued {
+		t.Fatalf("delay 实例应已落库 queued: %+v", ins)
+	}
+	if n := sch.pendingLen(); n != 1 {
+		t.Fatalf("delay>0 不应立即入队, pendingLen 应仍 1, got %d", n)
+	}
+
+	// 旧 SubmitManual 仍可用(返回 error)
+	if err := sch.SubmitManual(job, 0, "p"); err != nil {
+		t.Fatalf("SubmitManual 应可用: %v", err)
+	}
+}
+
+// runManualHeld 派发前查 DB:延迟入队期间被 cancel 的实例,到点不应被派发。
+// 回归:内存 manualItem.ins 是入队快照,原实现 runManualHeld 不查 DB,会把已取消实例 Dispatch
+// (无 worker → failed)。修复后派发前查 DB 见终态 → 跳过派发 + releaseByJob 归还槽,实例保持 canceled。
+func TestCancelDelayedNotDispatched(t *testing.T) {
+	st := newTestStore(t)
+	reg := workerreg.New(time.Minute, nil)
+	il := instancelog.New(t.TempDir(), 0)
+	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog())
+	t.Cleanup(func() { sch.stopTimers() })
+	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
+	_ = st.Job.Create(&domain.Job{ID: 1, AppID: 1, Name: "j", ExecuteType: "http", MaxConcurrency: 1})
+	job, _ := st.Job.Get(1, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go sch.RunManualDispatcher(ctx)
+
+	// delay=200ms 入队;立即 cancel → 到点 runManualHeld 应查 DB 见终态、不派发
+	id, err := sch.SubmitManualDelayed(job, 0, "", 200*time.Millisecond)
+	if err != nil || id <= 0 {
+		t.Fatalf("SubmitManualDelayed 应返回正 ID, err=%v", err)
+	}
+	if err := st.Instance.SetStatus(id, domain.StatusCanceled, "cancel"); err != nil {
+		t.Fatalf("SetStatus 失败: %v", err)
+	}
+
+	// 等延迟入队 + 派发器处理(未修复时实例会被 Dispatch → failed,状态偏离 canceled)
+	time.Sleep(500 * time.Millisecond)
+	ins, _ := st.Instance.Get(id)
+	if ins.Status != domain.StatusCanceled {
+		t.Fatalf("已 cancel 的延迟实例不应被派发(应保持 canceled), got %s", ins.Status)
+	}
 }

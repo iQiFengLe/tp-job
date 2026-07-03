@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -125,14 +126,18 @@ func main() {
 	jobSvc := dservice.NewJobService(st, sch)
 	insSvc := dservice.NewInstanceService(st, sch, il)
 
-	// 后台循环:定时调度 + 手动派发 + 失败转移 reaper + DB 重试 pump + worker 清理 + 会话清理 + 实例日志清理
-	go sch.Run(ctx)
-	go sch.RunManualDispatcher(ctx)
-	go sch.RunInstanceReaper(ctx, reg)
-	go sch.RunRetryPump(ctx)
-	go reg.Run(ctx)
-	go authStore.Run(ctx)
-	go il.Run(ctx)
+	// 后台循环:定时调度 + 手动派发 + 失败转移 reaper + DB 重试 pump(sch.Start,纳入 sch.wg 跟踪)
+	// + worker 清理 + 会话清理 + 实例日志清理(纳入 bg 跟踪)。优雅关闭时 cancel ctx 后统一等待,
+	// 避免关闭期写库与 sqlDB.Close 竞态。
+	sch.Start(ctx, reg)
+	var bg sync.WaitGroup
+	runBG := func(fn func()) {
+		bg.Add(1)
+		go func() { defer bg.Done(); fn() }()
+	}
+	runBG(func() { reg.Run(ctx) })
+	runBG(func() { authStore.Run(ctx) })
+	runBG(func() { il.Run(ctx) })
 
 	// HTTP 服务
 	webFS := resolveWebFS()
@@ -167,11 +172,26 @@ func main() {
 
 	cancel() // 停止调度器 / reaper / 清理循环
 
+	// 先停 HTTP(拒新请求、处理完在飞 handler),再等后台 goroutine 退出,最后关 DB——避免后台/reaper
+	// 仍在写库时 Close DB 造成竞态。sch.Wait 等调度循环 + 派发子协程;bg 等注册表/会话/日志清理循环。
+	// 各给 10s 超时,防某轮 runOnce 卡住拖死关闭进程(最坏丢极少量在飞写库,优于永久挂起)。
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutCancel()
 	if err := httpSrv.Shutdown(shutCtx); err != nil {
 		log.Error("HTTP 关闭失败", "err", err)
 	}
+	waitWithTimeout := func(done <-chan struct{}, name string) {
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			log.Warn(name+" 10s 内未全部退出,继续关闭", "wait", name)
+		}
+	}
+	schDone, bgDone := make(chan struct{}), make(chan struct{})
+	go func() { sch.Wait(); close(schDone) }()
+	go func() { bg.Wait(); close(bgDone) }()
+	waitWithTimeout(schDone, "调度协程")
+	waitWithTimeout(bgDone, "后台清理协程")
 	if sqlDB, err := st.DB.DB(); err == nil {
 		_ = sqlDB.Close()
 	}
@@ -230,6 +250,12 @@ func buildRouter(d routerDeps) *gin.Engine {
 		ServerAddr: d.cfg.PowerJob.ServerAddress,
 	})
 
+	// /openApi:PowerJob OpenAPI 兼容(App/Job/Instance 区,对齐 OpenAPIController),无鉴权
+	// (对齐 PowerJob OpenAPI 默认信任 + 网络隔离)。让原对接 PowerJob 的业务客户端零改动接入。
+	powerjob.RegisterOpenApi(r.Group("/openApi"), powerjob.OpenApiDeps{
+		Jobs: d.jobSvc, Instances: d.insSvc, Apps: d.appSvc, Store: d.st,
+	})
+
 	mountWeb(r, d.webFS)
 	return r
 }
@@ -264,8 +290,8 @@ func mountWeb(r *gin.Engine, webFS fs.FS) {
 	fileServer := http.FileServer(http.FS(webFS))
 	r.NoRoute(func(c *gin.Context) {
 		path := c.Request.URL.Path
-		if path == "/api" || path == "/server" || path == "/worker" ||
-			strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/server/") || strings.HasPrefix(path, "/worker/") {
+		if path == "/api" || path == "/server" || path == "/worker" || path == "/openApi" ||
+			strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/server/") || strings.HasPrefix(path, "/worker/") || strings.HasPrefix(path, "/openApi/") {
 			c.JSON(http.StatusNotFound, gin.H{"code": http.StatusNotFound, "msg": "接口不存在"})
 			return
 		}

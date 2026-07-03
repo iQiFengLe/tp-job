@@ -43,6 +43,15 @@ type Scheduler struct {
 	slotMu sync.Mutex
 	slots  map[int64]int   // jobID -> 在飞实例计数(auto+manual 共享)
 	held   map[int64]int64 // instanceID -> jobID(在飞绑定,供终态按实例释放)
+
+	// wg 跟踪由 Start 启动的循环及派发子协程(execute/runManualHeld),供 Wait 优雅关闭:
+	// main cancel 后等它们退出再关 DB,避免关闭期 DB 写入与 sqlDB.Close 竞态。
+	wg sync.WaitGroup
+
+	// timers 跟踪 SubmitManualDelayed 的延迟入队 timer(delay>0),Wait 前 stopTimers 统一取消,
+	// 避免关闭/测试结束后回调悬挂触发、持有 ins/job 指针妨碍 GC(pushPending 本身不碰 DB,无竞态)。
+	timerMu sync.Mutex
+	timers  map[int64]*time.Timer
 }
 
 // NewScheduler 创建调度器。interval 为扫描周期。
@@ -53,9 +62,46 @@ func NewScheduler(st *repository.Store, exec domain.Executor, il *instancelog.Lo
 	return &Scheduler{
 		store: st, executor: exec, il: il, log: log,
 		interval: interval, limit: 500,
-		wake:  make(chan struct{}, 1),
-		slots: make(map[int64]int), held: make(map[int64]int64),
+		wake:   make(chan struct{}, 1),
+		slots:  make(map[int64]int), held: make(map[int64]int64),
+		timers: make(map[int64]*time.Timer),
 	}
+}
+
+// Start 启动四个后台循环(定时调度 / 手动派发 / reaper / retry),全部纳入 wg 跟踪。reg 为 reaper
+// 判定 worker 在线性所需。main 应在 HTTP 启动前调用;优雅关闭时 cancel ctx 后调 Wait。
+func (s *Scheduler) Start(ctx context.Context, reg *workerreg.Registry) {
+	s.goTrack(func() { s.Run(ctx) })
+	s.goTrack(func() { s.RunManualDispatcher(ctx) })
+	s.goTrack(func() { s.RunInstanceReaper(ctx, reg) })
+	s.goTrack(func() { s.RunRetryPump(ctx) })
+}
+
+// Wait 阻塞至所有 Start 启动的循环及在飞派发协程退出。应在 ctx 取消后调用,并配合超时
+// 以防某轮 runOnce 卡住拖死关闭进程。先 stopTimers 取消未触发的延迟入队 timer,再等协程。
+func (s *Scheduler) Wait() {
+	s.stopTimers()
+	s.wg.Wait()
+}
+
+// stopTimers 取消所有未触发的延迟入队 timer,避免关闭/测试结束后回调悬挂(回调持有 ins/job 指针
+// 妨碍 GC)。已触发或正在执行的 timer.Stop 为 no-op,其回调自行收尾(pushPending 安全)。
+func (s *Scheduler) stopTimers() {
+	s.timerMu.Lock()
+	for _, t := range s.timers {
+		t.Stop()
+	}
+	s.timers = make(map[int64]*time.Timer)
+	s.timerMu.Unlock()
+}
+
+// goTrack 启动一个受 wg 跟踪的 goroutine,供优雅关闭统一等待(含派发子协程 execute/runManualHeld)。
+func (s *Scheduler) goTrack(fn func()) {
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		fn()
+	}()
 }
 
 // Run 定时调度循环,直到 ctx 取消。
@@ -95,7 +141,7 @@ func (s *Scheduler) dispatch(ctx context.Context, job *domain.Job) {
 		return
 	}
 	oldNext := *job.NextRunTime
-	go s.execute(ctx, job, oldNext)
+	s.goTrack(func() { s.execute(ctx, job, oldNext) })
 }
 
 // execute 认领 → 创建实例 → 派发。
@@ -187,10 +233,20 @@ func (h pqHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
 func (h *pqHeap) Push(x any)         { *h = append(*h, x.(manualItem)) }
 func (h *pqHeap) Pop() any           { old := *h; x := old[len(old)-1]; *h = old[:len(old)-1]; return x }
 
-// SubmitManual 将一次手动触发落库(queued)并入优先队列,由 RunManualDispatcher 按
-// MaxConcurrency 调度。返回 error 仅在实例落库失败时非 nil——此前为 fire-and-forget,
-// 调用方无法感知落库失败会空报 triggered。重启后残留的 queued 实例由 RecoverQueued 恢复。
+// SubmitManual 立即手动触发(落库 queued + 入优先队列)。返回 error(落库失败时非 nil)。
+// 不关心 instanceId 的内部调用方用此;需立即拿到 instanceId 的外部触发(OpenAPI runJob)用 SubmitManualDelayed。
+// 重启后残留的 queued 实例由 RecoverQueued 恢复。
 func (s *Scheduler) SubmitManual(job *domain.Job, priority int, instanceParams string) error {
+	_, err := s.SubmitManualDelayed(job, priority, instanceParams, 0)
+	return err
+}
+
+// SubmitManualDelayed 手动触发并返回实例 ID。delay>0 时延迟入队——立即落库返回 ID(客户端可立即
+// 拿到 instanceId),到点才真正入优先队列派发;对齐 PowerJob OpenAPI runJob 的 delay 语义。
+//
+// 延迟入队用进程内 timer:进程运行期完全正确;重启时未触发的延迟丢失,但实例已落库 queued,
+// 由 RecoverQueued 兜底(重启后立即入队派发——延迟语义丢失但实例不丢,at-least-once)。
+func (s *Scheduler) SubmitManualDelayed(job *domain.Job, priority int, instanceParams string, delay time.Duration) (int64, error) {
 	now := time.Now()
 	ins := &domain.Instance{
 		JobID:             job.ID,
@@ -203,15 +259,39 @@ func (s *Scheduler) SubmitManual(job *domain.Job, priority int, instanceParams s
 		JobInstanceParams: instanceParams,
 	}
 	if err := s.store.Instance.Create(ins); err != nil {
-		return fmt.Errorf("创建 queued 实例失败: %w", err)
+		return 0, fmt.Errorf("创建 queued 实例失败: %w", err)
 	}
 	s.appendLog(job, ins, "CREATE", "info", "手动触发排队")
+	s.enqueueManual(ins, job, priority, delay)
+	return ins.ID, nil
+}
+
+// enqueueManual 把已落库的 queued 实例加入优先队列。delay<=0 立即入队;delay>0 起 timer 到点入队。
+func (s *Scheduler) enqueueManual(ins *domain.Instance, job *domain.Job, priority int, delay time.Duration) {
+	if delay <= 0 {
+		s.pushPending(ins, job, priority)
+		return
+	}
+	// 起 timer 到点入队,并登记到 timers 供 Wait 前 stopTimers 取消(防关闭后悬挂回调)。
+	// 回调执行后自删;重启时未触发的延迟丢失,但实例已落库 queued,由 RecoverQueued 兜底。
+	t := time.AfterFunc(delay, func() {
+		s.pushPending(ins, job, priority)
+		s.timerMu.Lock()
+		delete(s.timers, ins.ID)
+		s.timerMu.Unlock()
+	})
+	s.timerMu.Lock()
+	s.timers[ins.ID] = t
+	s.timerMu.Unlock()
+}
+
+// pushPending 入队一条手动实例并唤醒派发器。
+func (s *Scheduler) pushPending(ins *domain.Instance, job *domain.Job, priority int) {
 	s.pqMu.Lock()
 	s.pqSeq++
 	heap.Push(&s.pq, manualItem{job: job, ins: ins, priority: priority, seq: s.pqSeq})
 	s.pqMu.Unlock()
 	s.notifyWake()
-	return nil
 }
 
 // RunManualDispatcher 按 MaxConcurrency 消费手动队列:抢任务级槽 → 派发(槽随实例生命周期)。
@@ -243,7 +323,7 @@ func (s *Scheduler) RunManualDispatcher(ctx context.Context) {
 			}
 			continue
 		}
-		go s.runManualHeld(ctx, item)
+		s.goTrack(func() { s.runManualHeld(ctx, item) })
 	}
 }
 
@@ -254,6 +334,18 @@ func (s *Scheduler) runManualHeld(ctx context.Context, item manualItem) {
 			s.releaseByInstance(item.ins.ID)
 		}
 	}()
+	// 派发前查 DB:延迟入队(time.AfterFunc)或排队期间,实例可能已被 OpenAPI stop/cancel 改成终态。
+	// 内存 manualItem.ins 是入队快照,不反映后续状态变更——若已终态则放弃派发,归还 tryAcquire 抢的
+	// job 槽(此时尚未 bindHeld,故用 releaseByJob 而非 releaseByInstance),避免把"已停止"的实例下发 worker。
+	if cur, err := s.store.Instance.Get(item.ins.ID); err != nil || domain.StatusTerminal(cur.Status) {
+		status := ""
+		if err == nil {
+			status = cur.Status
+		}
+		s.appendLog(item.job, item.ins, "STATUS", "info", "派发前实例已终态("+status+"),跳过派发")
+		s.releaseByJob(item.job.ID)
+		return
+	}
 	s.bindHeld(item.ins.ID, item.job.ID)
 	res := s.executor.Dispatch(ctx, item.job, item.ins)
 	if res.Accepted {
@@ -593,6 +685,10 @@ func (s *Scheduler) retryInstance(ctx context.Context, job *domain.Job, orig *do
 	} else {
 		_ = s.store.Instance.UpdateResult(retryIns.ID, domain.StatusFailed, res.Reason)
 		s.releaseByInstance(retryIns.ID)
+		// 派发失败(如瞬时无可用 worker)若仍有重试余力,交 RetryPump 后续重派——与 reaper 路径
+		// 一致,避免重试链因一次瞬时派发失败被提前终止(原实现直接定格 failed,白白耗光重试次数)。
+		// scheduleRetry 内部按 RetryIndex>=RetryCount 兜底,已达上限则定格终态 failed。
+		s.scheduleRetry(retryIns, job)
 	}
 }
 
