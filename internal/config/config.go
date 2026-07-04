@@ -53,7 +53,18 @@ type Log struct {
 
 // Scheduler 统一调度器参数。新 dispatch 调度器自带并发槽/排队语义,无需触发并发数等旧参数。
 type Scheduler struct {
-	IntervalMs int `yaml:"interval_ms"` // 扫描周期(毫秒);reaper/retry 复用
+	IntervalMs int         `yaml:"interval_ms"` // 扫描周期(毫秒);reaper/retry/callback pump 复用
+	Callback   CallbackCfg `yaml:"callback"`    // 实例状态变更回调
+}
+
+// CallbackCfg 实例状态变更回调配置。Job 配 callback_url 时,实例每次状态变化 POST 通知,至少一次。
+type CallbackCfg struct {
+	Enabled        bool `yaml:"enabled"`          // 总开关;false 时 hook 不构造回调,零开销
+	MaxAttempts    int  `yaml:"max_attempts"`     // 最大投递尝试次数,达上限置 dead;默认 8
+	BackoffBaseSec int  `yaml:"backoff_base_sec"` // 指数退避基数(秒) 2^attempt;默认 10
+	BackoffMaxSec  int  `yaml:"backoff_max_sec"`  // 退避上限(秒);默认 3600
+	TimeoutSec     int  `yaml:"timeout_sec"`      // 单次 POST 超时(秒);默认 10
+	RetentionDays  int  `yaml:"retention_days"`   // sent/dead 记录保留天数(审计);默认 7
 }
 
 type Worker struct {
@@ -187,6 +198,21 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Scheduler.IntervalMs == 0 {
 		c.Scheduler.IntervalMs = 1000
+	}
+	if c.Scheduler.Callback.MaxAttempts == 0 {
+		c.Scheduler.Callback.MaxAttempts = 8
+	}
+	if c.Scheduler.Callback.BackoffBaseSec == 0 {
+		c.Scheduler.Callback.BackoffBaseSec = 10
+	}
+	if c.Scheduler.Callback.BackoffMaxSec == 0 {
+		c.Scheduler.Callback.BackoffMaxSec = 3600
+	}
+	if c.Scheduler.Callback.TimeoutSec == 0 {
+		c.Scheduler.Callback.TimeoutSec = 10
+	}
+	if c.Scheduler.Callback.RetentionDays == 0 {
+		c.Scheduler.Callback.RetentionDays = 7
 	}
 	if c.Worker.TimeoutSeconds == 0 {
 		c.Worker.TimeoutSeconds = 600

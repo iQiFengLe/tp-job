@@ -35,7 +35,7 @@ func NextCron(expr string, from time.Time) (time.Time, error) {
 //   - cron:标准 5 段表达式
 //   - fix_rate / fix_delay:毫秒数(正整数)
 //   - delay:秒数(正整数)
-//   - manual / run_at:返回 nil(不自动调度)
+//   - api / run_at:返回 nil(不自动调度)
 func NextByKind(kind, expr string, from time.Time) (*time.Time, error) {
 	switch kind {
 	case "cron":
@@ -61,7 +61,7 @@ func NextByKind(kind, expr string, from time.Time) (*time.Time, error) {
 		}
 		n := from.Add(time.Duration(sec) * time.Second)
 		return &n, nil
-	case "manual", "run_at", "":
+	case "api", "run_at", "":
 		return nil, nil
 	}
 	return nil, fmt.Errorf("未知 schedule_kind: %s", kind)

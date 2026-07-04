@@ -5,8 +5,12 @@
 body {
   margin: 0;
   min-width: 1120px;
-  color: #1f2937;
-  background: #f5f7fb;
+  font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-weight: 300;
+  -webkit-font-smoothing: antialiased;
+  /* 背景/文字色由 ThemeProvider 用 useToken 同步过来(跟随 antd 主题);
+     此处的 transition 让切主题时背景平滑过渡。 */
+  transition: background 0.2s ease, color 0.2s ease;
 }
 
 .shell {
@@ -15,43 +19,63 @@ body {
 
 .side {
   min-height: 100vh;
-  box-shadow: 3px 0 14px rgba(12, 24, 40, 0.14);
+}
+
+/* Sider 内部用 flex 列布局:brand 固定高度,Menu 撑满剩余高度,使菜单背景填满侧栏底部并跟随主题。 */
+.side .ant-layout-sider-children {
+  display: flex;
+  flex-direction: column;
+}
+.side .brand {
+  flex: none;
+}
+.side .ant-menu {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .brand {
-  height: 72px;
+  height: 80px;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 0 20px;
-  color: #fff;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  gap: 14px;
+  padding: 0 24px;
 }
 
 .brand svg {
-  font-size: 24px;
-  color: #7cc4ff;
+  font-size: 28px;
 }
 
 .brand strong,
 .brand span {
   display: block;
+  line-height: 1.3;
+}
+
+.brand strong {
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
 }
 
 .brand span {
-  margin-top: 2px;
-  color: rgba(255, 255, 255, 0.62);
-  font-size: 12px;
+  margin-top: 3px;
+  font-size: 11px;
+  font-weight: 300;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
 }
 
 .topbar {
-  height: 64px;
-  padding: 0 24px;
+  height: 72px;
+  padding: 0 32px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  border-bottom: 1px solid #e7ebf3;
-  box-shadow: 0 1px 6px rgba(22, 34, 51, 0.04);
+  backdrop-filter: blur(8px);
+  position: sticky;
+  top: 0;
+  z-index: 10;
 }
 
 .app-switch {
@@ -59,6 +83,7 @@ body {
 }
 
 .content {
+  width: 100%;
   padding: 24px;
 }
 
@@ -70,24 +95,25 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  gap: 24px;
-  margin-bottom: 18px;
+  gap: 32px;
+  margin-bottom: 28px;
 }
 
 .view-head h3 {
-  margin: 0 0 4px;
+  margin: 0 0 8px;
+  font-family: 'Playfair Display', Georgia, serif;
+  font-weight: 400;
+  font-size: 32px;
+  letter-spacing: -0.02em;
 }
+
+/* 注:原 antd 组件覆盖段(.ant-table-*、.view-head .ant-typography、.credentials-panel .ant-form-item)
+   已移除,回归 antd 默认表格/排版/表单样式。视觉全部交给 antd 默认主题。 */
 
 .panel {
-  background: #fff;
-  border: 1px solid #e7ebf3;
-  border-radius: 8px;
-  padding: 18px;
-  margin-bottom: 16px;
-}
-
-.credentials-panel .ant-form-item {
-  margin-bottom: 0;
+  border-radius: 12px;
+  padding: 24px;
+  margin-bottom: 20px;
 }
 
 .credential-grid {
@@ -105,7 +131,9 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-bottom: 16px;
+  margin-bottom: 20px;
+  padding: 20px 24px;
+  border-radius: 12px;
 }
 
 .toolbar-search {
@@ -119,7 +147,7 @@ body {
 .form-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0 16px;
+  gap: 0 24px;
 }
 
 .full {
@@ -129,6 +157,7 @@ body {
 .link-button {
   height: auto;
   padding: 0;
+  font-weight: 500;
 }
 
 .status-select {
@@ -143,22 +172,14 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(245, 247, 251, 0.82);
-  backdrop-filter: blur(2px);
-  border: 1px dashed #c9d3e3;
-  border-radius: 8px;
+  backdrop-filter: blur(4px);
+  border-radius: 12px;
 }
 
-.ant-table-wrapper {
-  background: #fff;
-  border: 1px solid #e7ebf3;
-  border-radius: 8px;
-  overflow: hidden;
-}
-
-.ant-table-thead > tr > th {
-  background: #f8fafd !important;
-  color: #344054;
+/* 分页器与表格左右边框留出间距(antd 默认 margin:16px 0 会贴右边框;双类提升特异性压过 CSS-in-JS) */
+.table-container .ant-pagination {
+  margin-left: 16px !important;
+  margin-right: 16px !important;
 }
 
 /* 登录页 */
@@ -167,35 +188,45 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, #152033 0%, #1f2d4a 100%);
+  padding: 24px;
 }
 
 .login-card {
-  width: 380px;
-  padding: 8px 4px 4px;
+  width: 420px;
+  padding: 40px;
+  border-radius: 16px;
 }
 
 .login-brand {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 20px;
+  gap: 16px;
+  margin-bottom: 32px;
+  padding-bottom: 24px;
 }
 
 .login-brand svg {
-  font-size: 28px;
-  color: #1769aa;
+  font-size: 36px;
 }
 
 .login-brand strong,
 .login-brand span {
   display: block;
+  line-height: 1.3;
+}
+
+.login-brand strong {
+  font-family: 'Playfair Display', Georgia, serif;
+  font-size: 22px;
+  font-weight: 400;
+  letter-spacing: -0.01em;
 }
 
 .login-brand span {
-  margin-top: 2px;
-  color: #8a94a6;
-  font-size: 12px;
+  margin-top: 4px;
+  font-size: 13px;
+  font-weight: 300;
+  letter-spacing: 0.02em;
 }
 
 /* 启动 loading */
@@ -206,16 +237,17 @@ body {
   justify-content: center;
 }
 
-/* 实例日志(原样渲染调度埋点 + worker 上报行) */
+/* 实例日志(原样渲染调度埋点 + worker 上报行;终端风格,跨主题保留) */
 .log-pre {
   margin: 0;
-  padding: 12px;
-  background: #0f172a;
-  color: #d1d5db;
-  border-radius: 6px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.6;
+  padding: 16px;
+  background: #1F2421;
+  color: #E7E1D7;
+  border-radius: 8px;
+  border: 1px solid #E7E1D7;
+  font-family: 'SF Mono', 'Consolas', 'Monaco', 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.7;
   white-space: pre-wrap;
   word-break: break-all;
   max-height: 70vh;
@@ -237,8 +269,8 @@ body {
     align-items: stretch;
     flex-direction: column;
     height: auto;
-    padding-top: 12px;
-    padding-bottom: 12px;
+    padding-top: 16px;
+    padding-bottom: 16px;
   }
 
   .app-switch,

@@ -61,7 +61,7 @@ export interface AppUpdateValues {
 
 // ===== Job =====
 
-export type ScheduleKind = 'cron' | 'fix_rate' | 'fix_delay' | 'delay' | 'run_at' | 'manual';
+export type ScheduleKind = 'cron' | 'fix_rate' | 'fix_delay' | 'delay' | 'run_at' | 'api';
 
 export interface JobView {
   id: number;
@@ -74,11 +74,14 @@ export interface JobView {
   schedule_kind?: ScheduleKind;
   schedule_expr?: string;
   next_run_time?: string;
+  start_time?: number;
+  end_time?: number;
   max_concurrency?: number;
   max_wait_seconds?: number;
   retry_count?: number;
   retry_interval_sec?: number;
   default_priority?: number;
+  callback_url?: string;
   enabled: boolean;
   created_at: string;
   updated_at: string;
@@ -96,6 +99,9 @@ export interface JobCreateValues {
   retry_count?: number;
   retry_interval_sec?: number;
   default_priority?: number;
+  start_time?: number;
+  end_time?: number;
+  callback_url?: string;
   enabled?: boolean;
 }
 
@@ -120,6 +126,7 @@ export interface InstanceView {
   app_id: number;
   status: InstanceStatus | string;
   trigger_type?: string;
+  schedule_kind?: string;
   priority?: number;
   retry_index?: number;
   root_instance_id?: number;

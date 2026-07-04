@@ -42,13 +42,16 @@ type CreateJobReq struct {
 	JobParams        string `json:"job_params"`
 	Tag              string `json:"tag"`
 	TimeoutSec       int    `json:"timeout_sec"`
-	ScheduleKind     string `json:"schedule_kind" binding:"required"` // cron | fix_rate | fix_delay | delay | run_at | manual
+	ScheduleKind     string `json:"schedule_kind" binding:"required"` // cron | fix_rate | fix_delay | delay | run_at | api
 	ScheduleExpr     string `json:"schedule_expr"`
+	StartTime        *int64 `json:"start_time,omitempty"` // 毫秒戳;不传/<=0=无界
+	EndTime          *int64 `json:"end_time,omitempty"`
 	MaxConcurrency   int    `json:"max_concurrency"`
 	MaxWaitSeconds   int    `json:"max_wait_seconds"`
 	RetryCount       int    `json:"retry_count"`
 	RetryIntervalSec int    `json:"retry_interval_sec"`
 	DefaultPriority  int    `json:"default_priority"`
+	CallbackURL      string `json:"callback_url,omitempty"`
 	Enabled          *bool  `json:"enabled"`
 }
 
@@ -60,11 +63,14 @@ type UpdateJobReq struct {
 	TimeoutSec       *int    `json:"timeout_sec"`
 	ScheduleKind     *string `json:"schedule_kind"`
 	ScheduleExpr     *string `json:"schedule_expr"`
+	StartTime        *int64 `json:"start_time"` // 毫秒戳;nil=不改,<=0=清空,>0=设值
+	EndTime          *int64 `json:"end_time"`
 	MaxConcurrency   *int    `json:"max_concurrency"`
 	MaxWaitSeconds   *int    `json:"max_wait_seconds"`
 	RetryCount       *int    `json:"retry_count"`
 	RetryIntervalSec *int    `json:"retry_interval_sec"`
 	DefaultPriority  *int    `json:"default_priority"`
+	CallbackURL      *string `json:"callback_url"`
 	Enabled          *bool   `json:"enabled"`
 }
 
@@ -81,13 +87,16 @@ type JobView struct {
 	ScheduleKind string     `json:"schedule_kind,omitempty"`
 	ScheduleExpr string     `json:"schedule_expr,omitempty"`
 	NextRunTime  *time.Time `json:"next_run_time,omitempty"`
+	StartTime    int64 `json:"start_time,omitempty"` // 毫秒戳;0=无界
+	EndTime      int64 `json:"end_time,omitempty"`
 
 	MaxConcurrency   int  `json:"max_concurrency,omitempty"`
 	MaxWaitSeconds   int  `json:"max_wait_seconds,omitempty"`
 	RetryCount       int  `json:"retry_count,omitempty"`
 	RetryIntervalSec int  `json:"retry_interval_sec,omitempty"`
-	DefaultPriority  int  `json:"default_priority,omitempty"`
-	Enabled          bool `json:"enabled"`
+	DefaultPriority  int    `json:"default_priority,omitempty"`
+	CallbackURL      string `json:"callback_url,omitempty"`
+	Enabled          bool   `json:"enabled"`
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -101,6 +110,7 @@ type InstanceView struct {
 	AppID          int64      `json:"app_id"`
 	Status         string     `json:"status"`
 	TriggerType    string     `json:"trigger_type,omitempty"`
+	ScheduleKind   string     `json:"schedule_kind,omitempty"` // 来自关联 job(实例本身无此字段),列表批量填
 	Priority       int        `json:"priority,omitempty"`
 	RetryIndex     int        `json:"retry_index,omitempty"`
 	RootInstanceID int64      `json:"root_instance_id,omitempty"`
@@ -158,9 +168,10 @@ func JobToView(j *domain.Job) JobView {
 		ID: j.ID, AppID: j.AppID, Name: j.Name,
 		ExecuteType: j.ExecuteType, JobParams: j.JobParams, Tag: j.Tag, TimeoutSec: j.TimeoutSec,
 		ScheduleKind: j.ScheduleKind, ScheduleExpr: j.ScheduleExpr, NextRunTime: j.NextRunTime,
+		StartTime: timeToMs(j.StartTime), EndTime: timeToMs(j.EndTime),
 		MaxConcurrency: j.MaxConcurrency, MaxWaitSeconds: j.MaxWaitSeconds,
 		RetryCount: j.RetryCount, RetryIntervalSec: j.RetryIntervalSec,
-		DefaultPriority: j.DefaultPriority, Enabled: j.Enabled,
+		DefaultPriority: j.DefaultPriority, CallbackURL: j.CallbackURL, Enabled: j.Enabled,
 		CreatedAt: j.CreatedAt, UpdatedAt: j.UpdatedAt,
 	}
 }
@@ -203,9 +214,10 @@ func CreateJobReqToJob(appID int64, req CreateJobReq) (*domain.Job, error) {
 		AppID: appID, Name: req.Name,
 		ExecuteType: execType, JobParams: req.JobParams, Tag: req.Tag, TimeoutSec: req.TimeoutSec,
 		ScheduleKind: req.ScheduleKind, ScheduleExpr: req.ScheduleExpr,
+		StartTime: msToTimePtr(req.StartTime), EndTime: msToTimePtr(req.EndTime),
 		MaxConcurrency: maxConc, MaxWaitSeconds: maxWait,
 		RetryCount: req.RetryCount, RetryIntervalSec: req.RetryIntervalSec,
-		DefaultPriority: req.DefaultPriority, Enabled: enabled,
+		DefaultPriority: req.DefaultPriority, CallbackURL: req.CallbackURL, Enabled: enabled,
 	}, nil
 }
 
@@ -234,6 +246,12 @@ func UpdateJobReqToFields(req UpdateJobReq) map[string]any {
 	if req.ScheduleExpr != nil {
 		f["schedule_expr"] = *req.ScheduleExpr
 	}
+	if req.StartTime != nil {
+		f["start_time"] = msToTimePtr(req.StartTime) // <=0 → nil(清空,gorm map 写 NULL);>0 → 设值
+	}
+	if req.EndTime != nil {
+		f["end_time"] = msToTimePtr(req.EndTime)
+	}
 	if req.MaxConcurrency != nil {
 		f["max_concurrency"] = *req.MaxConcurrency
 	}
@@ -249,8 +267,28 @@ func UpdateJobReqToFields(req UpdateJobReq) map[string]any {
 	if req.DefaultPriority != nil {
 		f["default_priority"] = *req.DefaultPriority
 	}
+	if req.CallbackURL != nil {
+		f["callback_url"] = *req.CallbackURL
+	}
 	if req.Enabled != nil {
 		f["enabled"] = *req.Enabled
 	}
 	return f
+}
+
+// msToTimePtr 毫秒戳 → *time.Time;nil/非正 → nil(无界)。update fields 里 nil 由 gorm map 写 NULL(=清空)。
+func msToTimePtr(ms *int64) *time.Time {
+	if ms == nil || *ms <= 0 {
+		return nil
+	}
+	t := time.UnixMilli(*ms)
+	return &t
+}
+
+// timeToMs *time.Time → 毫秒戳;nil → 0(无界)。
+func timeToMs(t *time.Time) int64 {
+	if t == nil {
+		return 0
+	}
+	return t.UnixMilli()
 }

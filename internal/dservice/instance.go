@@ -18,13 +18,14 @@ var ErrInstanceValidate = errors.New("实例参数校验失败")
 
 // InstanceService 实例业务:状态上报(终态守护 + 释放槽)、查询、日志读取。
 type InstanceService struct {
-	st  *repository.Store
-	sch *dispatch.Scheduler
-	il  *instancelog.Logger
+	st        *repository.Store
+	sch       *dispatch.Scheduler
+	il        *instancelog.Logger
+	cbBuilder dispatch.CallbackBuilder
 }
 
-func NewInstanceService(st *repository.Store, sch *dispatch.Scheduler, il *instancelog.Logger) *InstanceService {
-	return &InstanceService{st: st, sch: sch, il: il}
+func NewInstanceService(st *repository.Store, sch *dispatch.Scheduler, il *instancelog.Logger, cbBuilder dispatch.CallbackBuilder) *InstanceService {
+	return &InstanceService{st: st, sch: sch, il: il, cbBuilder: cbBuilder}
 }
 
 // ReportStatus worker/管理端上报状态。
@@ -35,13 +36,35 @@ func (s *InstanceService) ReportStatus(id int64, status, result string) error {
 	if !domain.StatusValid(status) {
 		return fmt.Errorf("%w: 非法 status %q", ErrInstanceValidate, status)
 	}
-	if err := s.st.Instance.UpdateResult(id, status, result); err != nil {
+	cb := s.statusCallback(id, status, result)
+	if _, err := s.st.Instance.UpdateResultWithCallback(id, status, result, cb); err != nil {
 		return err
 	}
 	if domain.StatusTerminal(status) {
 		s.sch.ReleaseInFlight(id)
 	}
 	return nil
+}
+
+// statusCallback 构造状态变更回调快照。回调未启用(cbBuilder nil 或 Enabled=false)时返回 nil,
+// 不查 ins/job(零开销);启用时 Get ins+job,把新 status/result 写入 ins 内存供 payload 快照。
+func (s *InstanceService) statusCallback(id int64, status, result string) *domain.Callback {
+	if s.cbBuilder == nil || !s.cbBuilder.Enabled() {
+		return nil
+	}
+	ins, err := s.st.Instance.Get(id)
+	if err != nil {
+		return nil
+	}
+	// 终态短路:实例已终态时,UpdateResultWithCallback 的终态守护会让本次上报 rows==0(callback 不入库),
+	// 无需再 Get job + 构造——高频心跳/终态重放场景省一次 Job.Get + Build。
+	if domain.StatusTerminal(ins.Status) {
+		return nil
+	}
+	ins.Status = status
+	ins.Result = result
+	job, _ := s.st.Job.Get(ins.AppID, ins.JobID)
+	return s.cbBuilder.Build(ins, job, status)
 }
 
 // SetStatus 管理员强制写入状态(纠错:可复活或改终态),不守护、不释放槽。
@@ -61,7 +84,8 @@ func (s *InstanceService) SetStatus(id int64, status, result string) error {
 // 之所以仍立即释放槽:若改为不释放,worker 崩溃不回报时该实例已 stopped(reaper 只扫活跃态不捞),
 // 槽将永久泄漏、永久拉低 job 的 MaxConcurrency——临时超限(可自愈)远优于永久泄漏。
 func (s *InstanceService) Stop(id int64) error {
-	if err := s.st.Instance.SetStatus(id, domain.StatusStopped, "OpenAPI stop"); err != nil {
+	cb := s.statusCallback(id, domain.StatusStopped, "OpenAPI stop")
+	if _, err := s.st.Instance.SetStatusWithCallback(id, domain.StatusStopped, "OpenAPI stop", cb); err != nil {
 		return err
 	}
 	s.sch.ReleaseInFlight(id)
@@ -70,7 +94,8 @@ func (s *InstanceService) Stop(id int64) error {
 
 // Cancel 标记实例 canceled 并释放其并发槽(供 OpenAPI cancelInstance)。语义/限制同 Stop,见其注释。
 func (s *InstanceService) Cancel(id int64) error {
-	if err := s.st.Instance.SetStatus(id, domain.StatusCanceled, "OpenAPI cancel"); err != nil {
+	cb := s.statusCallback(id, domain.StatusCanceled, "OpenAPI cancel")
+	if _, err := s.st.Instance.SetStatusWithCallback(id, domain.StatusCanceled, "OpenAPI cancel", cb); err != nil {
 		return err
 	}
 	s.sch.ReleaseInFlight(id)

@@ -81,5 +81,10 @@ func New(cfg config.Database) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return FromDB(db)
+	st, err := FromDB(db)
+	if err != nil {
+		return nil, err
+	}
+	st.Driver = cfg.Driver
+	return st, nil
 }

@@ -15,19 +15,22 @@ import (
 // Store domain 仓储聚合。
 type Store struct {
 	DB       *gorm.DB
+	Driver   string // 数据库驱动类型(sqlite/postgres/mysql),用于 health 接口展示
 	App      AppStore
 	Job      JobStore
 	Instance InstanceStore
+	Callback CallbackStore
 }
 
 // FromDB 基于已打开的 gorm.DB 构建仓储,并 AutoMigrate domain 表(app/job/job_instance)。
 func FromDB(db *gorm.DB) (*Store, error) {
-	if err := db.AutoMigrate(&domain.App{}, &domain.Job{}, &domain.Instance{}); err != nil {
+	if err := db.AutoMigrate(&domain.App{}, &domain.Job{}, &domain.Instance{}, &domain.Callback{}); err != nil {
 		return nil, fmt.Errorf("domain auto migrate: %w", err)
 	}
 	s := &Store{DB: db}
 	s.App = AppStore{db: db}
 	s.Job = JobStore{db: db}
 	s.Instance = InstanceStore{db: db}
+	s.Callback = CallbackStore{db: db}
 	return s, nil
 }

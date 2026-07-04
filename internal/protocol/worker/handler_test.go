@@ -44,9 +44,9 @@ func newDeps(t *testing.T) (Deps, *repository.Store, *workerreg.Registry) {
 	}
 	reg := workerreg.New(time.Minute, nil)
 	il := instancelog.New(t.TempDir(), 0)
-	sch := dispatch.NewScheduler(st, dispatch.New(reg, time.Second), il, 50*time.Millisecond, discardLog())
+	sch := dispatch.NewScheduler(st, dispatch.New(reg, time.Second), il, 50*time.Millisecond, discardLog(), dispatch.NoopCallbackBuilder{})
 	return Deps{
-		Apps: dservice.NewAppService(st), Instances: dservice.NewInstanceService(st, sch, il),
+		Apps: dservice.NewAppService(st), Instances: dservice.NewInstanceService(st, sch, il, dispatch.NoopCallbackBuilder{}),
 		Reg: reg, IL: il, Store: st,
 	}, st, reg
 }

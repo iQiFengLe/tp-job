@@ -253,9 +253,31 @@ func (d Deps) listInstances(c *gin.Context) {
 		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// 批量查 job 的 schedule_kind 填入视图(消除逐实例 N+1)
+	jobSet := make(map[int64]struct{}, len(list))
+	for i := range list {
+		jobSet[list[i].JobID] = struct{}{}
+	}
+	ids := make([]int64, 0, len(jobSet))
+	for id := range jobSet {
+		ids = append(ids, id)
+	}
+	kinds := make(map[int64]string, len(ids))
+	if len(ids) > 0 {
+		jobs, err := d.Store.Job.ListByIDs(ids)
+		if err != nil {
+			fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		for i := range jobs {
+			kinds[jobs[i].ID] = jobs[i].ScheduleKind
+		}
+	}
 	views := make([]InstanceView, 0, len(list))
 	for i := range list {
-		views = append(views, InstanceToView(&list[i]))
+		v := InstanceToView(&list[i])
+		v.ScheduleKind = kinds[list[i].JobID]
+		views = append(views, v)
 	}
 	ok(c, gin.H{"list": views, "total": total})
 }
@@ -272,7 +294,7 @@ func (d Deps) getInstance(c *gin.Context) {
 }
 
 func (d Deps) instanceLogs(c *gin.Context) {
-	group := c.Query("group") == "1"
+	group := c.Query("group") == "true" || c.Query("group") == "1"
 	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "500"))
 	lines, total, err := d.Instances.LogsInApp(paramInt64(c, "appId"), paramInt64(c, "iid"), dservice.LogQuery{

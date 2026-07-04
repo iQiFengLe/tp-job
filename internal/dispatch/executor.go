@@ -17,6 +17,12 @@ import (
 	"task-schedule/internal/workerreg"
 )
 
+// server→worker 派发的 HTTP 路径(按 worker.protocol 选择);worker 端须注册同一路径,集中定义便于定位与演进。
+const (
+	pathHTTPRun        = "/run"
+	pathPowerJobRunJob = "/worker/runJob"
+)
+
 // PowerJobRunReq 是 PowerJob 协议 runJob 请求体的最小形状。
 // 阶段 3 的 protocol/powerjob 会提供完整 wire DTO + translator;此处只内联必要字段,
 // 避免 dispatch 反向依赖尚未落地的协议包。字段对齐官方 ServerScheduleJobReq。
@@ -54,34 +60,39 @@ func New(reg *workerreg.Registry, dispatchTimeout time.Duration) *Executor {
 	}
 }
 
-// Dispatch 实现 domain.Executor。
-func (e *Executor) Dispatch(ctx context.Context, job *domain.Job, ins *domain.Instance) domain.DispatchResult {
+// PickWorker 选 worker(不发请求)。tag 优先取实例,其次任务;按 score 择优。
+// 返回 addr+protocol(不返回完整 WorkerInfo,避免 domain.Executor 接口反向依赖 workerreg)。
+func (e *Executor) PickWorker(job *domain.Job, ins *domain.Instance) (addr, protocol string, ok bool) {
 	tag := ins.Tag
 	if tag == "" {
 		tag = job.Tag
 	}
 	w, ok := e.reg.PickFull(job.AppID, tag)
 	if !ok {
-		return domain.DispatchResult{Reason: "无可用 worker(tag 不匹配或全部离线)"}
+		return "", "", false
 	}
-	if err := e.push(ctx, w, job, ins); err != nil {
-		return domain.DispatchResult{Reason: err.Error()}
-	}
-	return domain.DispatchResult{Accepted: true, WorkerAddress: w.WorkerAddress}
+	return w.WorkerAddress, w.Protocol, true
 }
 
-// push 按 worker.protocol 构造请求体并 POST。
-func (e *Executor) push(ctx context.Context, w workerreg.WorkerInfo, job *domain.Job, ins *domain.Instance) error {
+// Send 对已选定的 worker(addr+protocol)发 POST。失败返回 error,由调用方善后(UpdateResult failed)。
+func (e *Executor) Send(ctx context.Context, addr, protocol string, job *domain.Job, ins *domain.Instance) error {
+	return e.push(ctx, addr, protocol, job, ins)
+}
+
+// push 按 protocol 构造请求体并 POST 到 addr。
+func (e *Executor) push(ctx context.Context, addr, protocol string, job *domain.Job, ins *domain.Instance) error {
 	var (
 		url  string
 		body []byte
 		err  error
 	)
-	addr := workerreg.NormalizeAddress(w.WorkerAddress)
-	switch w.Protocol {
+	// addr 归一化为 host:port 再拼 URL/塞 AllWorkerAddress(registry 以原值作 key,发请求用归一化值;
+	// worker 正常上报 host:port 时二者一致)。用具名变量 host,避免覆盖入参语义造成可读性陷阱。
+	host := workerreg.NormalizeAddress(addr)
+	switch protocol {
 	case workerreg.ProtocolPowerJob:
 		req := PowerJobRunReq{
-			AllWorkerAddress: []string{addr},
+			AllWorkerAddress: []string{host},
 			JobID:            job.ID,
 			InstanceId:       ins.ID,
 			JobParams:        job.JobParams,
@@ -93,7 +104,10 @@ func (e *Executor) push(ctx context.Context, w workerreg.WorkerInfo, job *domain
 		if err != nil {
 			return fmt.Errorf("序列化 runJob 失败: %w", err)
 		}
-		url = "http://" + addr + "/taskTracker/runJob"
+		// PowerJob 多语言 HTTP 协议:server→worker 派发 POST /worker/runJob,body=ServerScheduleJobReq
+		// (见官方「多语言支持/HTTP」文档)。非 /taskTracker/runJob——那是 akka 时代的 actor 路径,
+		// HTTP 规范已弃用;按官方规范实现的多语言 worker(.NET/Python 等)只认 /worker/runJob,派到旧路径会 404。
+		url = "http://" + host + pathPowerJobRunJob
 	default: // http
 		body, err = json.Marshal(domain.DispatchBody{
 			JobParams:         job.JobParams,
@@ -104,7 +118,7 @@ func (e *Executor) push(ctx context.Context, w workerreg.WorkerInfo, job *domain
 		if err != nil {
 			return fmt.Errorf("序列化 dispatch body 失败: %w", err)
 		}
-		url = "http://" + addr + "/run"
+		url = "http://" + host + pathHTTPRun
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))

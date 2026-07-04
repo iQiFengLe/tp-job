@@ -87,9 +87,11 @@ func (s InstanceStore) List(f InstanceFilter) ([]domain.Instance, int64, error) 
 	return list, total, nil
 }
 
-// UpdateResult 写入状态/结果;终态写 end_time。
-// 终态不可回退守护:仅当前非终态时才更新——worker 乱序/迟到上报不覆盖既有终态。
-func (s InstanceStore) UpdateResult(id int64, status, result string) error {
+// resultFields 构造 UpdateResult 路径(终态守护写)的字段集:终态写 end_time;
+// queued 解绑 worker(worker 回报 WAITING_DISPATCH=1 表示无法处理,清 worker_address + start_time
+// 使其可重新选址派发;否则绑定仍指向无法处理的 worker,重派时可能再次选中)。
+// UpdateResult 与 UpdateResultWithCallback 共用,避免终态/解绑规则双事实源。
+func resultFields(status, result string) map[string]any {
 	fields := map[string]any{"status": status}
 	if result != "" {
 		fields["result"] = result
@@ -97,13 +99,16 @@ func (s InstanceStore) UpdateResult(id int64, status, result string) error {
 	if domain.StatusTerminal(status) {
 		fields["end_time"] = time.Now()
 	}
-	return s.db.Model(&domain.Instance{}).
-		Where("id = ? AND status NOT IN ?", id, domain.TerminalStatuses()).
-		Updates(fields).Error
+	if status == domain.StatusQueued {
+		fields["worker_address"] = nil
+		fields["start_time"] = nil
+	}
+	return fields
 }
 
-// SetStatus 强制写入状态(管理员纠错,不守护终态,可把终态实例复活或改终态)。
-func (s InstanceStore) SetStatus(id int64, status, result string) error {
+// forceStatusFields 构造 SetStatus 路径(管理员强制,无守护)的字段集:终态写 end_time,
+// 非终态清 end_time(复活)。SetStatus 与 SetStatusWithCallback 共用。
+func forceStatusFields(status, result string) map[string]any {
 	fields := map[string]any{"status": status}
 	if result != "" {
 		fields["result"] = result
@@ -113,7 +118,19 @@ func (s InstanceStore) SetStatus(id int64, status, result string) error {
 	} else {
 		fields["end_time"] = nil // 复活:清空 end_time
 	}
-	return s.db.Model(&domain.Instance{}).Where("id = ?", id).Updates(fields).Error
+	return fields
+}
+
+// UpdateResult 写入状态/结果(终态不可回退守护:仅当前非终态时才更新,worker 乱序/迟到上报不覆盖既有终态)。
+func (s InstanceStore) UpdateResult(id int64, status, result string) error {
+	return s.db.Model(&domain.Instance{}).
+		Where("id = ? AND status NOT IN ?", id, domain.TerminalStatuses()).
+		Updates(resultFields(status, result)).Error
+}
+
+// SetStatus 强制写入状态(管理员纠错,不守护终态,可把终态实例复活或改终态)。
+func (s InstanceStore) SetStatus(id int64, status, result string) error {
+	return s.db.Model(&domain.Instance{}).Where("id = ?", id).Updates(forceStatusFields(status, result)).Error
 }
 
 // SetNextRetryTime 设定 DB 驱动重试到点时间。
@@ -166,3 +183,160 @@ func (s InstanceStore) ListQueued() ([]domain.Instance, error) {
 	return list, err
 }
 
+// ListUnboundQueued 返回 queued 且 worker_address=null 且距上次更新超过阈值的实例。
+// 用于 reaper 扫描"worker 无法处理已解绑"的实例:worker 回报 WAITING_DISPATCH(1→queued)
+// 表示无法处理(资源不足/依赖缺失),UpdateResult 会解绑 worker_address。该方法捞出这些实例,
+// 由 reaper 转 failed 触发重试(有 RetryCount 的会重派,无的定格 failed)。
+//
+// 仅回收 trigger_type 为 auto/retry 的实例:这两类不会"排队等槽"(auto 定时触发 tryAcquire
+// 失败即跳过本次;retry 槽满走 SetNextRetryTime),故无 worker_address 的 queued 必为派发后被解绑。
+// manual 实例由 SubmitManualDelayed 落库后进内存优先队列等 MaxConcurrency 槽,等槽期间 updated_at
+// 不刷新且 worker_address 为空——若纳入回收会被误杀(并发打满时 30s 后转 failed,RetryCount=0 则丢失、
+// >0 则重复执行)。manual 派发后被解绑的极少见边界(可手动 stop 处理),不在此自动回收。
+//
+// worker_address 为空串或 NULL 都算解绑(GORM Updates 空串不写 NULL);
+// updated_at < staleTime 避免误杀刚解绑的实例。按 updated_at ASC:卡得最久的优先处理。limit 500 防单轮全表扫打爆。
+func (s InstanceStore) ListUnboundQueued(staleThreshold time.Duration) ([]domain.Instance, error) {
+	var list []domain.Instance
+	staleTime := time.Now().Add(-staleThreshold)
+	err := s.db.Where(
+		"status = ? AND trigger_type IN ? AND (worker_address IS NULL OR worker_address = '') AND updated_at < ?",
+		domain.StatusQueued, []string{"auto", "retry"}, staleTime,
+	).Order("updated_at ASC").Limit(500).Find(&list).Error
+	return list, err
+}
+
+// ===== 状态变更 + 回调(同事务) =====
+//
+// *WithCallback 系列在写实例状态的同事务内顺带插入一条 callback 记录(cb 非 nil 时)。
+// 返回 RowsAffected:status 实际变化(匹配 WHERE)才 >0,调用方据此决定是否计入"真事件"。
+// cb.InstanceID 在事务内(ins 创建后 / 已知 id)回填。原方法(Create/MarkDispatched/...)保留无回调路径。
+
+// CreateWithCallback 创建实例;build 非 nil 时在 Create 后(ins.ID 已填)调用,同事务插入回调。
+// 用 build 闭包而非预构造 cb:保证 payload 快照里的 instance.id 是 Create 后的真实 ID(而非 0)。
+func (s InstanceStore) CreateWithCallback(ins *domain.Instance, build func() *domain.Callback) error {
+	if build == nil {
+		return s.db.Create(ins).Error
+	}
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(ins).Error; err != nil {
+			return err
+		}
+		cb := build() // ins.ID 已由 Create 填充
+		if cb == nil {
+			return nil
+		}
+		cb.InstanceID = ins.ID
+		return tx.Create(cb).Error
+	})
+}
+
+// MarkDispatchedWithCallback 置 waiting_receive;status 真变化(rows>0)且 cb 非 nil 才插回调。
+func (s InstanceStore) MarkDispatchedWithCallback(id int64, workerAddress string, cb *domain.Callback) (int64, error) {
+	if cb == nil {
+		return 0, s.MarkDispatched(id, workerAddress) // 无回调走原路径,免事务开销
+	}
+	var rows int64
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&domain.Instance{}).Where("id = ?", id).Updates(map[string]any{
+			"worker_address": workerAddress,
+			"start_time":     time.Now(),
+		}).Error; err != nil {
+			return err
+		}
+		res := tx.Model(&domain.Instance{}).
+			Where("id = ? AND status NOT IN ?", id, domain.TerminalStatuses()).
+			Update("status", domain.StatusWaitingReceive)
+		if res.Error != nil {
+			return res.Error
+		}
+		rows = res.RowsAffected
+		if rows == 0 {
+			return nil // 已终态守护未改
+		}
+		cb.InstanceID = id
+		return tx.Create(cb).Error
+	})
+	return rows, err
+}
+
+// UpdateResultWithCallback 写状态/结果(终态守护);status 真变化(rows>0)且 cb 非 nil 才插回调。
+// cb==nil 仍走事务(不插回调)以返回真实 RowsAffected——reaper/recover 据此判断实例是否已被
+// 并发终结,不能早返回到不返回 rows 的 UpdateResult 快路径。
+func (s InstanceStore) UpdateResultWithCallback(id int64, status, result string, cb *domain.Callback) (int64, error) {
+	var rows int64
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&domain.Instance{}).
+			Where("id = ? AND status NOT IN ?", id, domain.TerminalStatuses()).
+			Updates(resultFields(status, result))
+		if res.Error != nil {
+			return res.Error
+		}
+		rows = res.RowsAffected
+		if rows == 0 || cb == nil {
+			return nil
+		}
+		cb.InstanceID = id
+		return tx.Create(cb).Error
+	})
+	return rows, err
+}
+
+// FailDispatchWithCallback 派发失败善后专用:置 failed + 清 worker_address/start_time + end_time,
+// status 真变化(rows>0)且 cb 非 nil 才插回调。
+//
+// 清 worker 绑定是因为派发失败(选后即绑下 Send 失败时 worker_address 已先于 POST commit),
+// 该绑定无意义且会误导(展示一个 failed 实例仍指向某 worker);与 worker 回报 failed(保留
+// worker_address 供审计"哪个 worker 执行失败")路径区分,故不复用 UpdateResultWithCallback。
+// 终态守护同 UpdateResultWithCallback:并发 stop/cancel 已置终态时 rows=0,不覆盖。
+func (s InstanceStore) FailDispatchWithCallback(id int64, reason string, cb *domain.Callback) (int64, error) {
+	var rows int64
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		fields := map[string]any{
+			"status":         domain.StatusFailed,
+			"worker_address": nil,
+			"start_time":     nil,
+			"end_time":       time.Now(),
+		}
+		if reason != "" {
+			fields["result"] = reason
+		}
+		res := tx.Model(&domain.Instance{}).
+			Where("id = ? AND status NOT IN ?", id, domain.TerminalStatuses()).
+			Updates(fields)
+		if res.Error != nil {
+			return res.Error
+		}
+		rows = res.RowsAffected
+		if rows == 0 {
+			return nil
+		}
+		if cb != nil {
+			cb.InstanceID = id
+			return tx.Create(cb).Error
+		}
+		return nil
+	})
+	return rows, err
+}
+
+// SetStatusWithCallback 强制写状态(无守护);rows>0 且 cb 非 nil 才插回调。
+func (s InstanceStore) SetStatusWithCallback(id int64, status, result string, cb *domain.Callback) (int64, error) {
+	if cb == nil {
+		return 0, s.SetStatus(id, status, result) // 无回调走原路径
+	}
+	var rows int64
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&domain.Instance{}).Where("id = ?", id).Updates(forceStatusFields(status, result))
+		if res.Error != nil {
+			return res.Error
+		}
+		rows = res.RowsAffected
+		if rows == 0 {
+			return nil
+		}
+		cb.InstanceID = id
+		return tx.Create(cb).Error
+	})
+	return rows, err
+}

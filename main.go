@@ -85,8 +85,10 @@ func main() {
 	}
 
 	reg := workerreg.New(time.Duration(cfg.Worker.TimeoutSeconds)*time.Second, log)
+	var pol *workerreg.AddressPolicy
 	if len(cfg.Worker.AllowedCIDRs) > 0 {
-		pol, err := workerreg.NewAddressPolicy(cfg.Worker.AllowedCIDRs)
+		var err error
+		pol, err = workerreg.NewAddressPolicy(cfg.Worker.AllowedCIDRs)
 		if err != nil {
 			fail(err)
 		}
@@ -95,7 +97,8 @@ func main() {
 	}
 	il := instancelog.New(cfg.Log.Dir, time.Duration(cfg.Log.InstanceRetentionDays)*24*time.Hour)
 	exec := dispatch.New(reg, 10*time.Second) // 派发 POST 超时(远小于实例执行超时)
-	sch := dispatch.NewScheduler(st, exec, il, time.Duration(cfg.Scheduler.IntervalMs)*time.Millisecond, log)
+	cbBuilder := dispatch.NewCallbackBuilder(cfg.Scheduler.Callback.Enabled)
+	sch := dispatch.NewScheduler(st, exec, il, time.Duration(cfg.Scheduler.IntervalMs)*time.Millisecond, log, cbBuilder)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -124,12 +127,28 @@ func main() {
 
 	// 业务服务
 	jobSvc := dservice.NewJobService(st, sch)
-	insSvc := dservice.NewInstanceService(st, sch, il)
+	insSvc := dservice.NewInstanceService(st, sch, il, cbBuilder)
 
 	// 后台循环:定时调度 + 手动派发 + 失败转移 reaper + DB 重试 pump(sch.Start,纳入 sch.wg 跟踪)
 	// + worker 清理 + 会话清理 + 实例日志清理(纳入 bg 跟踪)。优雅关闭时 cancel ctx 后统一等待,
 	// 避免关闭期写库与 sqlDB.Close 竞态。
 	sch.Start(ctx, reg)
+
+	// 实例状态变更回调 pump:扫描 pending 回调,经 SSRF 安全的 client POST,至少一次。
+	// transport.DialContext 解析域名逐 IP 校验 pol(防 DNS rebinding);pol=nil 时放行(同 worker 语义)。
+	var cbPump *dispatch.CallbackPump
+	if cfg.Scheduler.Callback.Enabled {
+		if pol == nil {
+			log.Warn("callback 启用但未配 worker.allowed_cidrs,回调未受 SSRF 保护(任意 callback_url 均放行)")
+		}
+		cbTransport := dispatch.NewSSRFTransport(pol, time.Duration(cfg.Scheduler.Callback.TimeoutSec)*time.Second)
+		cbPump = dispatch.NewCallbackPump(st, &http.Client{
+			Timeout:   time.Duration(cfg.Scheduler.Callback.TimeoutSec) * time.Second,
+			Transport: cbTransport,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}, time.Duration(cfg.Scheduler.IntervalMs)*time.Millisecond, cfg.Scheduler.Callback, log)
+		cbPump.Start(ctx)
+	}
 	var bg sync.WaitGroup
 	runBG := func(fn func()) {
 		bg.Add(1)
@@ -187,11 +206,18 @@ func main() {
 			log.Warn(name+" 10s 内未全部退出,继续关闭", "wait", name)
 		}
 	}
-	schDone, bgDone := make(chan struct{}), make(chan struct{})
+	schDone, bgDone, cbDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	go func() { sch.Wait(); close(schDone) }()
 	go func() { bg.Wait(); close(bgDone) }()
+	go func() {
+		if cbPump != nil {
+			cbPump.Wait()
+		}
+		close(cbDone)
+	}()
 	waitWithTimeout(schDone, "调度协程")
 	waitWithTimeout(bgDone, "后台清理协程")
+	waitWithTimeout(cbDone, "回调 pump")
 	if sqlDB, err := st.DB.DB(); err == nil {
 		_ = sqlDB.Close()
 	}
@@ -260,7 +286,7 @@ func buildRouter(d routerDeps) *gin.Engine {
 	return r
 }
 
-// health 探活 DB:Ping 失败返回 503 degraded。不向匿名访问者泄露内网信息(仅暴露 status)。
+// health 探活 DB:Ping 失败返回 503 degraded。返回 status + driver(匿名可见,便于前端展示)。
 func health(c *gin.Context, st *repository.Store) {
 	status, httpStatus := "ok", 200
 	if sqlDB, err := st.DB.DB(); err != nil {
@@ -268,7 +294,10 @@ func health(c *gin.Context, st *repository.Store) {
 	} else if err := sqlDB.Ping(); err != nil {
 		status, httpStatus = "degraded", 503
 	}
-	c.JSON(httpStatus, gin.H{"code": 0, "msg": "ok", "data": gin.H{"status": status}})
+	c.JSON(httpStatus, gin.H{"code": 0, "msg": "ok", "data": gin.H{
+		"status": status,
+		"driver": st.Driver,
+	}})
 }
 
 // bodyLimit 限制请求体大小,防止超大 JSON 打爆内存。

@@ -75,7 +75,7 @@ func TestSchedulerDispatchesToWorker(t *testing.T) {
 	})
 
 	il := instancelog.New(t.TempDir(), 0)
-	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog())
+	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog(), NoopCallbackBuilder{})
 
 	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
 	now := time.Now()
@@ -122,7 +122,7 @@ func TestSchedulerCronSerial(t *testing.T) {
 		Metrics: domain.SystemMetrics{Score: 1}, Protocol: workerreg.ProtocolHTTP})
 
 	il := instancelog.New(t.TempDir(), 0)
-	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog())
+	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog(), NoopCallbackBuilder{})
 
 	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
 	now := time.Now()
@@ -160,7 +160,7 @@ func TestSchedulerNoWorkerFailsInstance(t *testing.T) {
 	// 不注册任何 worker
 	reg := workerreg.New(time.Minute, nil)
 	il := instancelog.New(t.TempDir(), 0)
-	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog())
+	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog(), NoopCallbackBuilder{})
 
 	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
 	now := time.Now()
@@ -184,7 +184,7 @@ func TestReaperWorkerGone(t *testing.T) {
 	st := newTestStore(t)
 	reg := workerreg.New(20*time.Millisecond, nil) // 短心跳超时
 	il := instancelog.New(t.TempDir(), 0)
-	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog())
+	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog(), NoopCallbackBuilder{})
 
 	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
 	_ = st.Job.Create(&domain.Job{ID: 1, AppID: 1, Name: "j", ExecuteType: "http", TimeoutSec: 0})
@@ -214,7 +214,7 @@ func TestRetryPump(t *testing.T) {
 		Metrics: domain.SystemMetrics{Score: 1}, Protocol: workerreg.ProtocolHTTP, AcceptNotTagJob: true})
 
 	il := instancelog.New(t.TempDir(), 0)
-	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog())
+	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog(), NoopCallbackBuilder{})
 
 	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
 	_ = st.Job.Create(&domain.Job{ID: 1, AppID: 1, Name: "j", ExecuteType: "http", RetryCount: 1, RetryIntervalSec: 1})
@@ -255,7 +255,7 @@ func TestRecoverQueued(t *testing.T) {
 		Metrics: domain.SystemMetrics{Score: 1}, Protocol: workerreg.ProtocolHTTP, AcceptNotTagJob: true})
 
 	il := instancelog.New(t.TempDir(), 0)
-	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog())
+	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog(), NoopCallbackBuilder{})
 
 	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
 	// MaxConcurrency=5 保证两个实例都能拿到槽(测试 worker 不回报终态,不释放槽)
@@ -293,7 +293,7 @@ func TestRecoverStaleActiveRetry(t *testing.T) {
 	st := newTestStore(t)
 	il := instancelog.New(t.TempDir(), 0)
 	sch := NewScheduler(st, New(workerreg.New(time.Minute, nil), time.Second), il,
-		50*time.Millisecond, discardLog())
+		50*time.Millisecond, discardLog(), NoopCallbackBuilder{})
 
 	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
 	// job 配了 1 次重试
@@ -322,7 +322,7 @@ func TestRetryDispatchFailContinues(t *testing.T) {
 	st := newTestStore(t)
 	reg := workerreg.New(time.Minute, nil) // 无 worker → 每次派发必失败
 	il := instancelog.New(t.TempDir(), 0)
-	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog())
+	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog(), NoopCallbackBuilder{})
 
 	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
 	// RetryCount=2:允许 0→1→2
@@ -355,7 +355,7 @@ func TestRecoverQueuedAllTypes(t *testing.T) {
 		Metrics: domain.SystemMetrics{Score: 1}, Protocol: workerreg.ProtocolHTTP, AcceptNotTagJob: true})
 
 	il := instancelog.New(t.TempDir(), 0)
-	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog())
+	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog(), NoopCallbackBuilder{})
 
 	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
 	_ = st.Job.Create(&domain.Job{ID: 1, AppID: 1, Name: "j", ExecuteType: "http", MaxConcurrency: 5})
@@ -386,7 +386,7 @@ func TestSubmitManualDelayed(t *testing.T) {
 	st := newTestStore(t)
 	reg := workerreg.New(time.Minute, nil)
 	il := instancelog.New(t.TempDir(), 0)
-	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog())
+	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog(), NoopCallbackBuilder{})
 	t.Cleanup(func() { sch.stopTimers() }) // 取消 delay>0 的入队 timer,防测试结束后悬挂回调
 	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
 	_ = st.Job.Create(&domain.Job{ID: 1, AppID: 1, Name: "j"})
@@ -427,7 +427,7 @@ func TestCancelDelayedNotDispatched(t *testing.T) {
 	st := newTestStore(t)
 	reg := workerreg.New(time.Minute, nil)
 	il := instancelog.New(t.TempDir(), 0)
-	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog())
+	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog(), NoopCallbackBuilder{})
 	t.Cleanup(func() { sch.stopTimers() })
 	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
 	_ = st.Job.Create(&domain.Job{ID: 1, AppID: 1, Name: "j", ExecuteType: "http", MaxConcurrency: 1})
@@ -451,5 +451,64 @@ func TestCancelDelayedNotDispatched(t *testing.T) {
 	ins, _ := st.Instance.Get(id)
 	if ins.Status != domain.StatusCanceled {
 		t.Fatalf("已 cancel 的延迟实例不应被派发(应保持 canceled), got %s", ins.Status)
+	}
+}
+
+// 生效窗口:start_time 在未来 → 到期 job 不创建实例,游标一次性推进到 start_time(不逐 tick 空耗)。
+func TestSchedulerWindowStartFuture(t *testing.T) {
+	st := newTestStore(t)
+	il := instancelog.New(t.TempDir(), 0)
+	reg := workerreg.New(time.Minute, nil)
+	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog(), NoopCallbackBuilder{})
+
+	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
+	now := time.Now()
+	start := now.Add(time.Hour) // 窗口 1h 后才开始
+	job := &domain.Job{AppID: 1, Name: "j", ExecuteType: "http",
+		ScheduleKind: "cron", ScheduleExpr: "*/1 * * * *", NextRunTime: &now, StartTime: &start}
+	if err := st.Job.Create(job); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go sch.Run(ctx)
+
+	// 游标应被推进到 start_time(离开 now),且全程不创建实例
+	waitFor(t, 3*time.Second, func() bool {
+		j, err := st.Job.Get(1, job.ID)
+		return err == nil && j.NextRunTime != nil && !j.NextRunTime.Before(start)
+	}, "start 前应把 next_run 推进到 start_time")
+	if list, _ := st.Instance.ListGeneralizedActive(0); len(list) != 0 {
+		t.Fatalf("start 前不应创建实例, got %d", len(list))
+	}
+}
+
+// 生效窗口:end_time 已过 → 到期 job 不创建实例,NextRunTime 置 nil 停摆(保持 enabled)。
+func TestSchedulerWindowEndPast(t *testing.T) {
+	st := newTestStore(t)
+	il := instancelog.New(t.TempDir(), 0)
+	reg := workerreg.New(time.Minute, nil)
+	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog(), NoopCallbackBuilder{})
+
+	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
+	now := time.Now()
+	past := now.Add(-time.Hour) // 窗口 1h 前已结束
+	job := &domain.Job{AppID: 1, Name: "j", ExecuteType: "http",
+		ScheduleKind: "cron", ScheduleExpr: "*/1 * * * *", NextRunTime: &now, EndTime: &past}
+	if err := st.Job.Create(job); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go sch.Run(ctx)
+
+	waitFor(t, 3*time.Second, func() bool {
+		j, err := st.Job.Get(1, job.ID)
+		return err == nil && j.NextRunTime == nil && j.Enabled
+	}, "end 后应 next_run=nil 且保持 enabled")
+	if list, _ := st.Instance.ListGeneralizedActive(0); len(list) != 0 {
+		t.Fatalf("end 后不应创建实例, got %d", len(list))
 	}
 }

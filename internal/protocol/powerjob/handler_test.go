@@ -22,6 +22,7 @@ import (
 	"task-schedule/internal/dservice"
 	"task-schedule/internal/instancelog"
 	"task-schedule/internal/repository"
+	"task-schedule/internal/wire"
 	"task-schedule/internal/workerreg"
 )
 
@@ -45,9 +46,9 @@ func newDeps(t *testing.T) (Deps, *repository.Store, *workerreg.Registry) {
 	}
 	reg := workerreg.New(time.Minute, nil)
 	il := instancelog.New(t.TempDir(), 0)
-	sch := dispatch.NewScheduler(st, dispatch.New(reg, time.Second), il, 50*time.Millisecond, discardLog())
+	sch := dispatch.NewScheduler(st, dispatch.New(reg, time.Second), il, 50*time.Millisecond, discardLog(), dispatch.NoopCallbackBuilder{})
 	return Deps{
-		Apps: dservice.NewAppService(st), Instances: dservice.NewInstanceService(st, sch, il),
+		Apps: dservice.NewAppService(st), Instances: dservice.NewInstanceService(st, sch, il, dispatch.NoopCallbackBuilder{}),
 		Reg: reg, IL: il, Store: st, ServerAddr: "host:8080",
 	}, st, reg
 }
@@ -112,7 +113,8 @@ func TestHeartbeatPick(t *testing.T) {
 	}
 }
 
-// reportInstanceStatus:数字码 5 → success;终态守护拒绝迟到 4。
+// reportInstanceStatus:数字码 5 → success;终态守护拒绝迟到 4;字符串 instanceId 也能推进;
+// 回报 1(WAITING_DISPATCH→queued)解绑 worker(无法处理,请重新调度)。
 func TestReportInstanceStatus(t *testing.T) {
 	d, st, _ := newDeps(t)
 	d.Apps.Create("a", "p", 0)
@@ -120,22 +122,57 @@ func TestReportInstanceStatus(t *testing.T) {
 	_ = st.Instance.Create(ins)
 
 	do(t, "POST", "/server/reportInstanceStatus",
-		ReportInstanceStatusReq{InstanceID: ins.ID, InstanceStatus: WireSucceed, Result: "ok"}, d)
+		ReportInstanceStatusReq{InstanceID: wire.FlexInt64(ins.ID), InstanceStatus: WireSucceed, Result: "ok"}, d)
 	got, _ := st.Instance.Get(ins.ID)
 	if got.Status != domain.StatusSuccess {
 		t.Fatalf("数字码 5 应→success, got %s", got.Status)
 	}
 	// 迟到 4(FAILED)不覆盖
 	do(t, "POST", "/server/reportInstanceStatus",
-		ReportInstanceStatusReq{InstanceID: ins.ID, InstanceStatus: WireFailed}, d)
+		ReportInstanceStatusReq{InstanceID: wire.FlexInt64(ins.ID), InstanceStatus: WireFailed}, d)
 	got, _ = st.Instance.Get(ins.ID)
 	if got.Status != domain.StatusSuccess {
 		t.Fatalf("终态守护应拒绝覆盖, got %s", got.Status)
 	}
 	// 非法码 7 静默
 	do(t, "POST", "/server/reportInstanceStatus",
-		ReportInstanceStatusReq{InstanceID: ins.ID, InstanceStatus: 7}, d)
+		ReportInstanceStatusReq{InstanceID: wire.FlexInt64(ins.ID), InstanceStatus: 7}, d)
+	// 字符串写法(多语言 worker 实际发 "instanceId":"5"):FlexInt64 必须兼容,状态也能推进
+	ins2 := &domain.Instance{JobID: 1, AppID: 1, Status: domain.StatusRunning}
+	_ = st.Instance.Create(ins2)
+	do(t, "POST", "/server/reportInstanceStatus", map[string]any{
+		"instanceId": strconv.FormatInt(ins2.ID, 10), "instanceStatus": WireSucceed, "result": "ok",
+	}, d)
+	got2, _ := st.Instance.Get(ins2.ID)
+	if got2.Status != domain.StatusSuccess {
+		t.Fatalf("字符串 instanceId 应也能→success, got %s", got2.Status)
+	}
+
+	// worker 回报 1(WAITING_DISPATCH)表示无法处理:应解绑 worker + 清 start_time,使实例可重新派发
+	ins3 := &domain.Instance{
+		JobID: 1, AppID: 1, Status: domain.StatusWaitingReceive,
+		WorkerAddress: "worker1:9000", StartTime: timePtr(time.Now()),
+	}
+	_ = st.Instance.Create(ins3)
+	do(t, "POST", "/server/reportInstanceStatus",
+		ReportInstanceStatusReq{InstanceID: wire.FlexInt64(ins3.ID), InstanceStatus: WireWaitingDispatch,
+			Result: "资源不足,请重新调度"}, d)
+	got3, _ := st.Instance.Get(ins3.ID)
+	if got3.Status != domain.StatusQueued {
+		t.Fatalf("回报 1 应→queued, got %s", got3.Status)
+	}
+	if got3.WorkerAddress != "" {
+		t.Fatalf("回报 queued 应解绑 worker,got %s", got3.WorkerAddress)
+	}
+	if got3.StartTime != nil {
+		t.Fatalf("回报 queued 应清 start_time,got %v", got3.StartTime)
+	}
+	if got3.Result != "资源不足,请重新调度" {
+		t.Fatalf("result 应保留,got %s", got3.Result)
+	}
 }
+
+func timePtr(t time.Time) *time.Time { return &t }
 
 // reportLog:批量落库到实例日志。
 func TestReportLog(t *testing.T) {
@@ -145,13 +182,33 @@ func TestReportLog(t *testing.T) {
 	ins := &domain.Instance{JobID: 1, AppID: 1, Status: domain.StatusRunning}
 	_ = st.Instance.Create(ins)
 
+	// 数字写法(PowerJob 标准):instanceId 是数字
 	do(t, "POST", "/server/reportLog", LogReportReq{InstanceLogContents: []LogContent{
-		{InstanceID: ins.ID, LogLevel: 4, LogContent: "boom", LogTime: 1000},
-		{InstanceID: ins.ID, LogLevel: 2, LogContent: "ok"},
+		{InstanceID: wire.FlexInt64(ins.ID), LogLevel: 4, LogContent: "boom", LogTime: 1000},
 	}}, d)
+	// 字符串写法(多语言 worker 实际发 "instanceId":"5"):wire.FlexInt64 必须兼容,
+	// 否则 Go json 严格类型置零 → 关联不到实例 → 日志丢失(曾因此丢全部 worker 过程日志)
+	do(t, "POST", "/server/reportLog", map[string]any{
+		"instanceLogContents": []map[string]any{
+			{"instanceId": strconv.FormatInt(ins.ID, 10), "logLevel": 2, "logContent": "ok", "logTime": 2000},
+		},
+	}, d)
 	lines, total, _ := il.Read(ins.AppID, ins.ID, ins.RootInstanceID, instancelog.LogQuery{})
 	if total != 2 {
-		t.Fatalf("应 2 行日志, got %d", total)
+		t.Fatalf("数字+字符串两种 instanceId 写法都应落库, got %d 行: %v", total, lines)
+	}
+	// 坏 id(空/非法,FlexInt64 解析为 0)必须被跳过,且不影响同批合法日志落库——
+	// 防 cache[0]=nil 污染回归:一旦把 iid=0 的 nil 写入 cache,同批后续合法日志也可能被连带吞掉。
+	do(t, "POST", "/server/reportLog", map[string]any{
+		"instanceLogContents": []map[string]any{
+			{"instanceId": "", "logLevel": 4, "logContent": "bad-empty", "logTime": 3000},
+			{"instanceId": "not-a-number", "logLevel": 4, "logContent": "bad-nan", "logTime": 3100},
+			{"instanceId": strconv.FormatInt(ins.ID, 10), "logLevel": 2, "logContent": "after-bad", "logTime": 3200},
+		},
+	}, d)
+	_, total2, _ := il.Read(ins.AppID, ins.ID, ins.RootInstanceID, instancelog.LogQuery{})
+	if total2 != 3 {
+		t.Fatalf("坏 id 应跳过且不污染批次,合法日志应继续落库(预期 3 行), got %d", total2)
 	}
 	_ = lines
 }
@@ -163,7 +220,7 @@ func TestQueryJobCluster(t *testing.T) {
 	d.Reg.Heartbeat(workerreg.WorkerInfo{AppID: app.ID, WorkerAddress: "w1:9", Protocol: workerreg.ProtocolPowerJob})
 	d.Reg.Heartbeat(workerreg.WorkerInfo{AppID: app.ID, WorkerAddress: "w2:9", Protocol: workerreg.ProtocolPowerJob})
 
-	w := do(t, "POST", "/server/queryJobCluster", QueryClusterReq{AppID: app.ID}, d)
+	w := do(t, "POST", "/server/queryJobCluster", QueryClusterReq{AppID: wire.FlexInt64(app.ID)}, d)
 	var resp AskResponse
 	_ = json.Unmarshal(w.Body.Bytes(), &resp)
 	if !resp.Success {
@@ -195,10 +252,10 @@ func newOpenApiDeps(t *testing.T) (OpenApiDeps, *repository.Store) {
 	}
 	reg := workerreg.New(time.Minute, nil)
 	il := instancelog.New(t.TempDir(), 0)
-	sch := dispatch.NewScheduler(st, dispatch.New(reg, time.Second), il, 50*time.Millisecond, discardLog())
+	sch := dispatch.NewScheduler(st, dispatch.New(reg, time.Second), il, 50*time.Millisecond, discardLog(), dispatch.NoopCallbackBuilder{})
 	return OpenApiDeps{
 		Jobs:      dservice.NewJobService(st, sch),
-		Instances: dservice.NewInstanceService(st, sch, il),
+		Instances: dservice.NewInstanceService(st, sch, il, dispatch.NoopCallbackBuilder{}),
 		Apps:      dservice.NewAppService(st),
 		Store:     st,
 	}, st
@@ -208,7 +265,7 @@ func newOpenApiDeps(t *testing.T) (OpenApiDeps, *repository.Store) {
 func TestOpenApiRunJob(t *testing.T) {
 	d, st := newOpenApiDeps(t)
 	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
-	_ = st.Job.Create(&domain.Job{ID: 1, AppID: 1, Name: "j", ExecuteType: "http", ScheduleKind: "manual", Enabled: true})
+	_ = st.Job.Create(&domain.Job{ID: 1, AppID: 1, Name: "j", ExecuteType: "http", ScheduleKind: "api", Enabled: true})
 
 	post := func(body string) *httptest.ResponseRecorder {
 		g := gin.New()

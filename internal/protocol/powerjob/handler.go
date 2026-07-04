@@ -42,7 +42,7 @@ func (d Deps) assertApp(c *gin.Context) {
 	}
 	app, err := d.Apps.GetByName(appName)
 	if err != nil {
-		c.JSON(http.StatusOK, ResultFail("app(" + appName + ") is not registered"))
+		c.JSON(http.StatusOK, ResultFail("app("+appName+") is not registered"))
 		return
 	}
 	c.JSON(http.StatusOK, ResultOK(app.ID))
@@ -98,8 +98,12 @@ func (d Deps) reportInstanceStatus(c *gin.Context) {
 		c.JSON(http.StatusOK, AskSucceedNil()) // 非法码静默忽略(对齐 PowerJob 行为)
 		return
 	}
+	if int64(req.InstanceID) <= 0 {
+		c.JSON(http.StatusOK, AskSucceedNil()) // 脏 id(FlexInt64 解析失败),对齐 reportLog 跳过
+		return
+	}
 	status, _ := WireToDomain(req.InstanceStatus)
-	_ = d.Instances.ReportStatus(req.InstanceID, status, req.Result)
+	_ = d.Instances.ReportStatus(int64(req.InstanceID), status, req.Result)
 	c.JSON(http.StatusOK, AskSucceedNil())
 }
 
@@ -109,14 +113,20 @@ func (d Deps) reportLog(c *gin.Context) {
 	_ = c.ShouldBindJSON(&req)
 	cache := make(map[int64]*domain.Instance)
 	for _, lc := range req.InstanceLogContents {
-		ins, ok := cache[lc.InstanceID]
+		iid := int64(lc.InstanceID)
+		if iid <= 0 {
+			// 主键自增从 1 起,id<=0 必为 FlexInt64 解析失败的脏数据(空/null/缺字段)。
+			// 跳过且不写入 cache——否则 cache[0]=nil 会污染整个批次,让同批所有坏 id 日志被静默吞掉。
+			continue
+		}
+		ins, ok := cache[iid]
 		if !ok {
-			got, err := d.Instances.Get(lc.InstanceID)
+			got, err := d.Instances.Get(iid)
 			ins = got
 			if err != nil {
 				ins = nil
 			}
-			cache[lc.InstanceID] = ins
+			cache[iid] = ins
 		}
 		if ins == nil {
 			continue
@@ -138,7 +148,7 @@ func (d Deps) queryJobCluster(c *gin.Context) {
 		c.JSON(http.StatusOK, AskFailed("参数错误"))
 		return
 	}
-	app, err := d.Store.App.Get(req.AppID)
+	app, err := d.Store.App.Get(int64(req.AppID))
 	if err != nil {
 		c.JSON(http.StatusOK, AskFailed("app not found"))
 		return

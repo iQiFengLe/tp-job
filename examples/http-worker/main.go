@@ -10,7 +10,7 @@
 //	# 先用管理台/登录创建一个 app(如 demo),再启动 worker 指向它:
 //	go run ./examples/http-worker -server http://127.0.0.1:8080 -app demo -addr :9001 -tags gpu
 //
-// 然后在管理台为该 app 创建 manual 任务并触发,即可看到实例 waiting_receive → running → success。
+// 然后在管理台为该 app 创建 api 任务并触发,即可看到实例 waiting_receive → running → success。
 //
 // ⚠ /worker/* 无鉴权(靠 appName + 网络隔离);本示例仅用于本地联调,勿直接暴露公网。
 package main

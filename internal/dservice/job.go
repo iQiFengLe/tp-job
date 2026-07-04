@@ -3,6 +3,7 @@ package dservice
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"time"
 
 	"gorm.io/gorm"
@@ -23,7 +24,7 @@ func NewJobService(st *repository.Store, sch *dispatch.Scheduler) *JobService {
 	return &JobService{st: st, sch: sch}
 }
 
-// computeNextRun 按 job 当前调度配置推算下次执行时间;disabled 或 manual/run_at 返回 nil。
+// computeNextRun 按 job 当前调度配置推算下次执行时间;disabled 或 api/run_at 返回 nil。
 // Create 与 Update 共用,确保启用/改调度后 next_run 一致地由配置驱动。
 func computeNextRun(job *domain.Job) (*time.Time, error) {
 	if !job.Enabled {
@@ -59,9 +60,20 @@ func validateJob(j *domain.Job) error {
 		j.MaxWaitSeconds = 0
 	}
 	switch j.ScheduleKind {
-	case "cron", "fix_rate", "fix_delay", "delay", "run_at", "manual":
+	case "cron", "fix_rate", "fix_delay", "delay", "run_at", "api":
 	default:
 		return fmt.Errorf("非法 schedule_kind: %s", j.ScheduleKind)
+	}
+	// 生效窗口:若都指定,起始不能晚于截止
+	if j.StartTime != nil && j.EndTime != nil && j.StartTime.After(*j.EndTime) {
+		return errors.New("start_time 不能晚于 end_time")
+	}
+	// 回调 URL(可选):必须是合法 http(s) URL
+	if j.CallbackURL != "" {
+		u, err := url.Parse(j.CallbackURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return errors.New("callback_url 必须是合法 http(s) URL")
+		}
 	}
 	// 启用 + 自动调度类型必须有合法表达式
 	if j.Enabled && (j.ScheduleKind == "cron" || j.ScheduleKind == "fix_rate" ||
@@ -74,7 +86,7 @@ func validateJob(j *domain.Job) error {
 }
 
 // Update 部分更新(指针字段)。调度相关字段(schedule_kind/schedule_expr/enabled)变化时
-// 重算 next_run_time——否则把 manual 改 cron、启用 disabled job 等会因 next_run 未刷新而永不触发。
+// 重算 next_run_time——否则把 api 改 cron、启用 disabled job 等会因 next_run 未刷新而永不触发。
 func (s *JobService) Update(appID, id int64, fields map[string]any) error {
 	if len(fields) == 0 {
 		return nil
@@ -140,6 +152,14 @@ func applyJobFields(j *domain.Job, fields map[string]any) {
 		case "schedule_expr":
 			if s, ok := v.(string); ok {
 				j.ScheduleExpr = s
+			}
+		case "start_time":
+			if t, ok := v.(*time.Time); ok {
+				j.StartTime = t
+			}
+		case "end_time":
+			if t, ok := v.(*time.Time); ok {
+				j.EndTime = t
 			}
 		case "max_concurrency":
 			j.MaxConcurrency = toInt(v)

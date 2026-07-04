@@ -44,10 +44,10 @@ func newDeps(t *testing.T) (Deps, *repository.Store) {
 	}
 	reg := workerreg.New(time.Minute, nil)
 	il := instancelog.New(t.TempDir(), 0)
-	sch := dispatch.NewScheduler(st, dispatch.New(reg, time.Second), il, 50*time.Millisecond, discardLog())
+	sch := dispatch.NewScheduler(st, dispatch.New(reg, time.Second), il, 50*time.Millisecond, discardLog(), dispatch.NoopCallbackBuilder{})
 	return Deps{
 		Apps: dservice.NewAppService(st), Jobs: dservice.NewJobService(st, sch),
-		Instances: dservice.NewInstanceService(st, sch, il), Store: st,
+		Instances: dservice.NewInstanceService(st, sch, il, dispatch.NoopCallbackBuilder{}), Store: st,
 	}, st
 }
 
@@ -89,7 +89,7 @@ func TestOwnFullChain(t *testing.T) {
 
 	// 2. createJob(cron)
 	w = req(t, "POST", "/api/apps/"+itoa(appID)+"/jobs",
-		CreateJobReq{Name: "j", ScheduleKind: "manual", JobParams: "p1", Tag: "t"}, d)
+		CreateJobReq{Name: "j", ScheduleKind: "api", JobParams: "p1", Tag: "t"}, d)
 	if w.Code != http.StatusOK {
 		t.Fatalf("createJob 应 200, got %d: %s", w.Code, w.Body.String())
 	}
@@ -186,7 +186,7 @@ func TestOwnInstanceCrossAppDenied(t *testing.T) {
 	wa2 := req(t, "POST", "/api/apps", CreateAppReq{AppName: "a2", Password: "p"}, d)
 	a2 := int64(bodyData(t, wa2)["data"].(map[string]any)["id"].(float64))
 
-	wj := req(t, "POST", "/api/apps/"+itoa(a1)+"/jobs", CreateJobReq{Name: "j", ScheduleKind: "manual"}, d)
+	wj := req(t, "POST", "/api/apps/"+itoa(a1)+"/jobs", CreateJobReq{Name: "j", ScheduleKind: "api"}, d)
 	jobID := int64(bodyData(t, wj)["data"].(map[string]any)["id"].(float64))
 
 	// 手动触发 → app1 名下 1 个 queued 实例(SubmitManual 落库即返回,不依赖调度循环)

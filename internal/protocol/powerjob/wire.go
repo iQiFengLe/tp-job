@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"task-schedule/internal/domain"
+	"task-schedule/internal/wire"
 )
 
 // AskResponse Actor ask 的统一响应(对齐 PowerJob):data 为 base64(业务对象 JSON)。
@@ -54,11 +55,13 @@ type HeartbeatReq struct {
 }
 
 // ReportInstanceStatusReq worker 回报实例状态(官方数字码)。
+// InstanceID/JobID 用 wire.FlexInt64:多语言 worker 上报的数值 ID 实测类型不一致
+// (reportLog 发字符串、reportInstanceStatus 发数字),兼容两种写法,对齐 Jackson 宽松解析。
 type ReportInstanceStatusReq struct {
-	InstanceID     int64  `json:"instanceId"`
-	JobID          int64  `json:"jobId"`
-	InstanceStatus int    `json:"instanceStatus"`
-	Result         string `json:"result"`
+	InstanceID     wire.FlexInt64 `json:"instanceId"`
+	JobID          wire.FlexInt64 `json:"jobId"`
+	InstanceStatus int            `json:"instanceStatus"`
+	Result         string         `json:"result"`
 }
 
 // LogReportReq worker 批量上报日志。
@@ -68,14 +71,14 @@ type LogReportReq struct {
 
 // LogContent 单条日志(PowerJob 原生 LogLevel int:1=DEBUG 2=INFO 3=WARN 4=ERROR)。
 type LogContent struct {
-	InstanceID int64  `json:"instanceId"`
-	LogLevel   int    `json:"level"`
-	LogContent string `json:"logContent"`
-	LogTime    int64  `json:"logTime"`
+	InstanceID wire.FlexInt64 `json:"instanceId"`
+	LogLevel   int            `json:"logLevel"` // PowerJob WorkerLog 标准字段名(非 level)
+	LogContent string         `json:"logContent"`
+	LogTime    int64          `json:"logTime"`
 }
 
 // QueryClusterReq worker 查询 job 的执行集群(在线 worker 列表)。
 type QueryClusterReq struct {
-	AppID int64 `json:"appId"`
-	JobID int64 `json:"jobId"`
+	AppID wire.FlexInt64 `json:"appId"`
+	JobID wire.FlexInt64 `json:"jobId"`
 }

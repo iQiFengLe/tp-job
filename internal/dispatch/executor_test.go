@@ -36,12 +36,15 @@ func TestDispatchHTTPAccepted(t *testing.T) {
 	job := &domain.Job{ID: 7, AppID: 1, JobParams: "p", ExecuteType: "http"}
 	ins := &domain.Instance{ID: 90, JobID: 7, AppID: 1, JobInstanceParams: "ip"}
 
-	res := ex.Dispatch(context.Background(), job, ins)
-	if !res.Accepted {
-		t.Fatalf("应被接收, reason=%s", res.Reason)
+	addr, protocol, ok := ex.PickWorker(job, ins)
+	if !ok {
+		t.Fatalf("应选到 worker")
 	}
-	if res.WorkerAddress != srv.Listener.Addr().String() {
-		t.Fatalf("应回传 worker 地址, got %s", res.WorkerAddress)
+	if addr != srv.Listener.Addr().String() {
+		t.Fatalf("应回传 worker 地址, got %s", addr)
+	}
+	if err := ex.Send(context.Background(), addr, protocol, job, ins); err != nil {
+		t.Fatalf("应发送成功: %v", err)
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -61,12 +64,12 @@ func TestDispatchWorker2xxFail(t *testing.T) {
 		Metrics: domain.SystemMetrics{Score: 1}, Protocol: workerreg.ProtocolHTTP})
 
 	ex := New(reg, time.Second)
-	res := ex.Dispatch(context.Background(), &domain.Job{AppID: 1}, &domain.Instance{AppID: 1})
-	if res.Accepted {
-		t.Fatal("500 应判失败")
+	addr, protocol, ok := ex.PickWorker(&domain.Job{AppID: 1}, &domain.Instance{AppID: 1})
+	if !ok {
+		t.Fatal("应选到 worker")
 	}
-	if res.WorkerAddress != "" {
-		t.Fatalf("失败不应回传地址, got %s", res.WorkerAddress)
+	if err := ex.Send(context.Background(), addr, protocol, &domain.Job{AppID: 1}, &domain.Instance{AppID: 1}); err == nil {
+		t.Fatal("500 应判失败")
 	}
 }
 
@@ -81,10 +84,10 @@ func TestDispatchNoWorker(t *testing.T) {
 		Metrics: domain.SystemMetrics{Score: 1}, Tags: []string{"gpu"}, Protocol: workerreg.ProtocolHTTP})
 
 	ex := New(reg, time.Second)
-	// 任务 tag=cpu,worker 只接 gpu,且不 acceptNotTagJob → 不命中
-	res := ex.Dispatch(context.Background(), &domain.Job{AppID: 1, Tag: "cpu"}, &domain.Instance{AppID: 1})
-	if res.Accepted || hits != 0 {
-		t.Fatalf("无匹配 worker 应不派发, Accepted=%v hits=%d", res.Accepted, hits)
+	// 任务 tag=cpu,worker 只接 gpu,且不 acceptNotTagJob → 不命中,PickWorker 应选不到且不发请求
+	_, _, ok := ex.PickWorker(&domain.Job{AppID: 1, Tag: "cpu"}, &domain.Instance{AppID: 1})
+	if ok || hits != 0 {
+		t.Fatalf("无匹配 worker 应选不到且不发请求, ok=%v hits=%d", ok, hits)
 	}
 }
 
@@ -99,13 +102,13 @@ func TestDispatchInstanceTagOverridesJob(t *testing.T) {
 
 	ex := New(reg, time.Second)
 	// Job.Tag=cpu 但 Instance.Tag=gpu → 用 gpu 匹配,命中
-	res := ex.Dispatch(context.Background(), &domain.Job{AppID: 1, Tag: "cpu"}, &domain.Instance{AppID: 1, Tag: "gpu"})
-	if !res.Accepted {
-		t.Fatalf("Instance.Tag=gpu 应覆盖 Job.Tag=cpu 并命中, reason=%s", res.Reason)
+	_, _, ok := ex.PickWorker(&domain.Job{AppID: 1, Tag: "cpu"}, &domain.Instance{AppID: 1, Tag: "gpu"})
+	if !ok {
+		t.Fatalf("Instance.Tag=gpu 应覆盖 Job.Tag=cpu 并命中")
 	}
 }
 
-// PowerJob 协议走 /taskTracker/runJob。
+// PowerJob 协议走官方多语言 HTTP 规范路径 /worker/runJob。
 func TestDispatchPowerJobPath(t *testing.T) {
 	var path string
 	var mu sync.Mutex
@@ -122,13 +125,16 @@ func TestDispatchPowerJobPath(t *testing.T) {
 		Metrics: domain.SystemMetrics{Score: 1}, Protocol: workerreg.ProtocolPowerJob})
 
 	ex := New(reg, time.Second)
-	res := ex.Dispatch(context.Background(), &domain.Job{AppID: 1, ExecuteType: "http"}, &domain.Instance{AppID: 1})
-	if !res.Accepted {
-		t.Fatal("应被接收")
+	addr, protocol, ok := ex.PickWorker(&domain.Job{AppID: 1, ExecuteType: "http"}, &domain.Instance{AppID: 1})
+	if !ok {
+		t.Fatal("应选到 worker")
+	}
+	if err := ex.Send(context.Background(), addr, protocol, &domain.Job{AppID: 1, ExecuteType: "http"}, &domain.Instance{AppID: 1}); err != nil {
+		t.Fatalf("应发送成功: %v", err)
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if path != "/taskTracker/runJob" {
-		t.Fatalf("PowerJob 协议应 POST /taskTracker/runJob, got %s", path)
+	if path != "/worker/runJob" {
+		t.Fatalf("PowerJob 协议应 POST /worker/runJob, got %s", path)
 	}
 }

@@ -26,7 +26,7 @@ go run .
 # 3. 另起一个终端,跑示例 http worker(先在管理台或用 API 建 app "demo")
 go run ./examples/http-worker -server http://127.0.0.1:8080 -app demo -addr :9001
 
-# 4. 打开 http://127.0.0.1:8080 → 用 admin / change-me-admin 登录 → 建 app → 建 manual 任务 → 触发
+# 4. 打开 http://127.0.0.1:8080 → 用 admin / change-me-admin 登录 → 建 app → 建 api 任务 → 触发
 ```
 
 release 模式拒绝默认占位密码启动(见下「鉴权」)。
@@ -98,7 +98,7 @@ worker 启动 → 心跳 {appName, workerAddress, systemMetrics, tags} (无 toke
 | `fix_rate` / `fix_delay` | 毫秒数 `"5000"` |
 | `delay` | 秒数 `"300"` |
 | `run_at` | RFC3339 一次性 |
-| `manual` | —(仅手动触发) |
+| `api` | —(仅 API/手动触发) |
 
 ## 鉴权
 

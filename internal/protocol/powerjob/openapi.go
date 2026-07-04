@@ -86,6 +86,8 @@ type JobInfoDTO struct {
 	InstanceRetryNum   int    `json:"instanceRetryNum,omitempty"`
 	Status             int    `json:"status,omitempty"` // 1 正常 / 2 停止
 	NextTriggerTime    int64  `json:"nextTriggerTime,omitempty"` // ms
+	StartTime          int64  `json:"startTime,omitempty"`       // ms 生效起始
+	EndTime            int64  `json:"endTime,omitempty"`         // ms 生效截止
 	Tag                string `json:"tag,omitempty"`
 	GmtCreate          int64  `json:"gmtCreate,omitempty"`  // ms
 	GmtModified        int64  `json:"gmtModified,omitempty"` // ms
@@ -117,6 +119,8 @@ type SaveJobReq struct {
 	JobParams          *string `json:"jobParams,omitempty"`
 	TimeExpressionType *int    `json:"timeExpressionType,omitempty"`
 	TimeExpression     *string `json:"timeExpression,omitempty"`
+	StartTime          *int64  `json:"startTime,omitempty"` // ms 生效起始
+	EndTime            *int64  `json:"endTime,omitempty"`   // ms 生效截止
 	Concurrency        *int    `json:"concurrency,omitempty"`
 	InstanceTimeLimit  *int64  `json:"instanceTimeLimit,omitempty"`
 	InstanceRetryNum   *int    `json:"instanceRetryNum,omitempty"`
@@ -169,7 +173,7 @@ func scheduleKindToWire(k string) int {
 		return 3
 	case "fix_delay":
 		return 4
-	default: // manual / run_at / delay → API(一次性)
+	default: // api / run_at / delay → API(一次性)
 		return 1
 	}
 }
@@ -183,7 +187,7 @@ func wireToScheduleKind(t int) string {
 	case 4:
 		return "fix_delay"
 	default:
-		return "manual"
+		return "api"
 	}
 }
 
@@ -192,6 +196,15 @@ func ms(t *time.Time) int64 {
 		return 0
 	}
 	return t.UnixMilli()
+}
+
+// msToTimePtr 毫秒时间戳 → *time.Time;nil/非正 → nil(无界)。
+func msToTimePtr(v *int64) *time.Time {
+	if v == nil || *v <= 0 {
+		return nil
+	}
+	t := time.UnixMilli(*v)
+	return &t
 }
 
 func jobToDTO(j *domain.Job) JobInfoDTO {
@@ -210,6 +223,8 @@ func jobToDTO(j *domain.Job) JobInfoDTO {
 		InstanceRetryNum:  j.RetryCount,
 		Status:            status,
 		NextTriggerTime:   ms(j.NextRunTime),
+		StartTime:         ms(j.StartTime),
+		EndTime:           ms(j.EndTime),
 		Tag:               j.Tag,
 		GmtCreate:         j.CreatedAt.UnixMilli(),
 		GmtModified:       j.UpdatedAt.UnixMilli(),
@@ -394,6 +409,12 @@ func (d OpenApiDeps) saveJob(c *gin.Context) {
 		if r.Tag != nil {
 			fields["tag"] = *r.Tag
 		}
+		if r.StartTime != nil {
+			fields["start_time"] = msToTimePtr(r.StartTime)
+		}
+		if r.EndTime != nil {
+			fields["end_time"] = msToTimePtr(r.EndTime)
+		}
 		if err := d.Jobs.Update(appID, *r.ID, fields); err != nil {
 			c.JSON(http.StatusOK, ResultFail(err.Error()))
 			return
@@ -407,7 +428,7 @@ func (d OpenApiDeps) saveJob(c *gin.Context) {
 		c.JSON(http.StatusOK, ResultFail("jobName 不能为空"))
 		return
 	}
-	// 表达式与类型必须配对:漏传 timeExpressionType 会落到 manual,cron/fix_rate 表达式被静默忽略、
+	// 表达式与类型必须配对:漏传 timeExpressionType 会落到 api,cron/fix_rate 表达式被静默忽略、
 	// 创建出永不自动调度的 job,客户端无错误反馈。
 	if r.TimeExpression != nil && *r.TimeExpression != "" && (r.TimeExpressionType == nil || *r.TimeExpressionType <= 0) {
 		c.JSON(http.StatusOK, ResultFail("提供 timeExpression 时必须同时指定 timeExpressionType"))
@@ -420,6 +441,8 @@ func (d OpenApiDeps) saveJob(c *gin.Context) {
 		TimeoutSec:     int(int64Val(r.InstanceTimeLimit) / 1000),
 		ScheduleKind:   wireToScheduleKind(intVal(r.TimeExpressionType)),
 		ScheduleExpr:   strOrDefault(r.TimeExpression),
+		StartTime:      msToTimePtr(r.StartTime),
+		EndTime:        msToTimePtr(r.EndTime),
 		MaxConcurrency: intOrDefault(r.Concurrency, 1),
 		RetryCount:     intVal(r.InstanceRetryNum),
 		Enabled:        boolOrDefault(r.Enable, true),

@@ -26,10 +26,11 @@ import (
 //   - RunInstanceReaper:扫 waiting_receive/running 实例,worker 失联或执行超 TimeoutSec → failed 重派。
 //   - RunRetryPump:扫 failed 且 next_retry_time 到期的实例,按 retryIndex+1 重派(DB 驱动,重启不丢)。
 type Scheduler struct {
-	store    *repository.Store
-	executor domain.Executor
-	il       *instancelog.Logger
-	log      *slog.Logger
+	store     *repository.Store
+	executor  domain.Executor
+	il        *instancelog.Logger
+	log       *slog.Logger
+	cbBuilder CallbackBuilder // 实例状态变更回调构造(nil=Noop,走原路径)
 
 	interval time.Duration
 	limit    int
@@ -55,15 +56,18 @@ type Scheduler struct {
 }
 
 // NewScheduler 创建调度器。interval 为扫描周期。
-func NewScheduler(st *repository.Store, exec domain.Executor, il *instancelog.Logger, interval time.Duration, log *slog.Logger) *Scheduler {
+func NewScheduler(st *repository.Store, exec domain.Executor, il *instancelog.Logger, interval time.Duration, log *slog.Logger, cbBuilder CallbackBuilder) *Scheduler {
 	if interval <= 0 {
 		interval = time.Second
 	}
+	if cbBuilder == nil {
+		cbBuilder = NoopCallbackBuilder{}
+	}
 	return &Scheduler{
-		store: st, executor: exec, il: il, log: log,
+		store: st, executor: exec, il: il, log: log, cbBuilder: cbBuilder,
 		interval: interval, limit: 500,
-		wake:   make(chan struct{}, 1),
-		slots:  make(map[int64]int), held: make(map[int64]int64),
+		wake:  make(chan struct{}, 1),
+		slots: make(map[int64]int), held: make(map[int64]int64),
 		timers: make(map[int64]*time.Timer),
 	}
 }
@@ -160,7 +164,8 @@ func (s *Scheduler) execute(ctx context.Context, job *domain.Job, oldNext time.T
 		}
 	}()
 
-	newNext, nerr := schedtime.NextByKind(job.ScheduleKind, job.ScheduleExpr, time.Now())
+	now := time.Now()
+	newNext, nerr := schedtime.NextByKind(job.ScheduleKind, job.ScheduleExpr, now)
 	if nerr != nil {
 		// 表达式非法(被改坏/边界解析失败):不静默置 nil 停摆——先 error 告警,再置 nil 暂停
 		// 该 job 自动调度,等管理员修表达式后 update 触发重算(比旧版静默吞错多了告警)。
@@ -168,6 +173,22 @@ func (s *Scheduler) execute(ctx context.Context, job *domain.Job, oldNext time.T
 			"job_id", job.ID, "kind", job.ScheduleKind, "expr", job.ScheduleExpr, "err", nerr)
 		newNext = nil
 	}
+
+	// 生效窗口(可选 StartTime/EndTime):仅约束自动调度,手动触发不受限。
+	// 窗口外不创建实例,但仍推进游标——start 前一次性跳到窗口开始(避免每 tick 空耗),
+	// end 后置 nil 停摆(保持 enabled,改 end_time 可续期)。
+	inWindow := true
+	if job.StartTime != nil && now.Before(*job.StartTime) {
+		inWindow = false
+		if newNext == nil || newNext.Before(*job.StartTime) {
+			newNext = job.StartTime
+		}
+	}
+	if job.EndTime != nil && now.After(*job.EndTime) {
+		inWindow = false
+		newNext = nil
+	}
+
 	ok, err := s.store.Job.AdvanceNextRun(job.ID, oldNext, newNext)
 	if err != nil {
 		s.log.Error("认领 job 失败", "job_id", job.ID, "err", err)
@@ -178,8 +199,12 @@ func (s *Scheduler) execute(ctx context.Context, job *domain.Job, oldNext time.T
 		s.releaseByJob(job.ID)
 		return // 已被认领 / 游标已变
 	}
+	if !inWindow {
+		s.releaseByJob(job.ID)
+		s.log.Info("生效窗口外,跳过自动调度", "job_id", job.ID, "has_next", newNext != nil)
+		return // 游标已推进,本次不创建实例
+	}
 
-	now := time.Now()
 	ins = &domain.Instance{
 		JobID:             job.ID,
 		AppID:             job.AppID,
@@ -189,7 +214,9 @@ func (s *Scheduler) execute(ctx context.Context, job *domain.Job, oldNext time.T
 		Tag:               job.Tag,
 		JobInstanceParams: job.JobParams, // 定时触发:实例参数默认=任务参数
 	}
-	if err := s.store.Instance.Create(ins); err != nil {
+	if err := s.store.Instance.CreateWithCallback(ins, func() *domain.Callback {
+		return s.cbBuilder.Build(ins, job, domain.StatusQueued)
+	}); err != nil {
 		s.log.Error("创建实例失败", "job_id", job.ID, "err", err)
 		s.releaseByJob(job.ID)
 		return
@@ -197,18 +224,13 @@ func (s *Scheduler) execute(ctx context.Context, job *domain.Job, oldNext time.T
 	s.appendLog(job, ins, "CREATE", "info", "实例创建")
 	s.bindHeld(ins.ID, job.ID) // 先绑:保证后续任一终态路径能经 ReleaseInFlight 释放
 
-	res := s.executor.Dispatch(ctx, job, ins)
-	if res.Accepted {
-		if err := s.store.Instance.MarkDispatched(ins.ID, res.WorkerAddress); err != nil {
-			s.log.Error("标记派发失败", "instance_id", ins.ID, "err", err)
-		}
-		s.appendLog(job, ins, "DISPATCH", "info", "派发到 worker "+res.WorkerAddress)
-		// 槽随实例到终态(不释放)
-	} else {
-		_ = s.store.Instance.UpdateResult(ins.ID, domain.StatusFailed, res.Reason)
-		s.appendLog(job, ins, "STATUS", "error", "派发失败→failed: "+res.Reason)
-		s.releaseByInstance(ins.ID)
+	// 选后即绑派发:PickWorker → MarkDispatched → Send,任一失败由 dispatchToWorker 统一善后
+	// (UpdateResult failed + 衔接 RetryPump 重试;RetryCount=0 时 scheduleRetry 定格 failed 无副作用,
+	// 故对不重试的 job 行为不变)。prefix=「派发」用于 STATUS/DISPATCH 日志文案。
+	if s.dispatchToWorker(ctx, job, ins, "派发") {
+		return
 	}
+	// 槽随实例到终态(不释放)
 }
 
 // ===== 手动触发(优先队列) =====
@@ -229,9 +251,9 @@ func (h pqHeap) Less(i, j int) bool {
 	}
 	return h[i].seq < h[j].seq
 }
-func (h pqHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
-func (h *pqHeap) Push(x any)         { *h = append(*h, x.(manualItem)) }
-func (h *pqHeap) Pop() any           { old := *h; x := old[len(old)-1]; *h = old[:len(old)-1]; return x }
+func (h pqHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h *pqHeap) Push(x any)   { *h = append(*h, x.(manualItem)) }
+func (h *pqHeap) Pop() any     { old := *h; x := old[len(old)-1]; *h = old[:len(old)-1]; return x }
 
 // SubmitManual 立即手动触发(落库 queued + 入优先队列)。返回 error(落库失败时非 nil)。
 // 不关心 instanceId 的内部调用方用此;需立即拿到 instanceId 的外部触发(OpenAPI runJob)用 SubmitManualDelayed。
@@ -258,7 +280,9 @@ func (s *Scheduler) SubmitManualDelayed(job *domain.Job, priority int, instanceP
 		Tag:               job.Tag,
 		JobInstanceParams: instanceParams,
 	}
-	if err := s.store.Instance.Create(ins); err != nil {
+	if err := s.store.Instance.CreateWithCallback(ins, func() *domain.Callback {
+		return s.cbBuilder.Build(ins, job, domain.StatusQueued)
+	}); err != nil {
 		return 0, fmt.Errorf("创建 queued 实例失败: %w", err)
 	}
 	s.appendLog(job, ins, "CREATE", "info", "手动触发排队")
@@ -347,16 +371,9 @@ func (s *Scheduler) runManualHeld(ctx context.Context, item manualItem) {
 		return
 	}
 	s.bindHeld(item.ins.ID, item.job.ID)
-	res := s.executor.Dispatch(ctx, item.job, item.ins)
-	if res.Accepted {
-		if err := s.store.Instance.MarkDispatched(item.ins.ID, res.WorkerAddress); err != nil {
-			s.log.Error("标记派发失败", "instance_id", item.ins.ID, "err", err)
-		}
-		s.appendLog(item.job, item.ins, "DISPATCH", "info", "手动触发派发到 "+res.WorkerAddress)
-	} else {
-		_ = s.store.Instance.UpdateResult(item.ins.ID, domain.StatusFailed, res.Reason)
-		s.appendLog(item.job, item.ins, "STATUS", "error", "手动派发失败: "+res.Reason)
-		s.releaseByInstance(item.ins.ID)
+	// 选后即绑派发(同 execute,详见 dispatchToWorker)。
+	if s.dispatchToWorker(ctx, item.job, item.ins, "手动触发派发") {
+		return
 	}
 }
 
@@ -428,12 +445,19 @@ func (s *Scheduler) RecoverStaleActive() error {
 	jobs := s.loadJobs(list) // 批量预加载,消除 scheduleRetry 的逐实例 Job.Get
 	for i := range list {
 		ins := list[i]
-		if err := s.store.Instance.UpdateResult(ins.ID, domain.StatusFailed, "服务重启前未完成"); err != nil {
+		ins.Status = domain.StatusFailed
+		ins.Result = "服务重启前未完成"
+		job := jobs[ins.JobID]
+		rows, err := s.store.Instance.UpdateResultWithCallback(ins.ID, domain.StatusFailed, "服务重启前未完成", s.cbBuilder.Build(&ins, job, domain.StatusFailed))
+		if err != nil {
 			s.log.Error("重启清理实例失败", "instance_id", ins.ID, "err", err)
 			continue
 		}
+		if rows == 0 {
+			continue // 已被并发终结(worker 迟到回报等),不重复 appendLog/scheduleRetry
+		}
 		s.appendLogRaw(&ins, "REAP", "error", "失败转移: 服务重启前未完成")
-		s.scheduleRetry(&ins, jobs[ins.JobID])
+		s.scheduleRetry(&ins, job)
 	}
 	if n := len(list); n > 0 {
 		s.log.Info("已清理重启前未终结的实例(有重试余力的将由 RetryPump 重派)", "count", n)
@@ -553,25 +577,44 @@ func (s *Scheduler) loadJobs(list []domain.Instance) map[int64]*domain.Job {
 }
 
 func (s *Scheduler) reapOnce(reg *workerreg.Registry) {
+	// 1. 扫描 waiting_receive/running 卡死实例
 	list, err := s.store.Instance.ListGeneralizedActive(s.limit)
 	if err != nil {
 		s.log.Error("reaper 扫描失败", "err", err)
 		return
 	}
-	if len(list) == 0 {
+	if len(list) > 0 {
+		jobs := s.loadJobs(list) // 批量预加载,消除 N+1
+		now := time.Now()
+		for i := range list {
+			ins := list[i]
+			job := jobs[ins.JobID]
+			if job == nil {
+				s.finalizeReaped(&ins, "job 不存在,失败转移", nil)
+				continue
+			}
+			if reason := s.stallReason(&ins, job, reg, now); reason != "" {
+				s.finalizeReaped(&ins, reason, job)
+			}
+		}
+	}
+
+	// 2. 扫描 worker 无法处理已解绑的实例(queued 且 worker_address=null 且超 30s)
+	unboundList, err := s.store.Instance.ListUnboundQueued(30 * time.Second)
+	if err != nil {
+		s.log.Error("reaper 扫描解绑实例失败", "err", err)
 		return
 	}
-	jobs := s.loadJobs(list) // 批量预加载,消除 N+1
-	now := time.Now()
-	for i := range list {
-		ins := list[i]
-		job := jobs[ins.JobID]
-		if job == nil {
-			s.finalizeReaped(&ins, "job 不存在,失败转移", nil)
-			continue
-		}
-		if reason := s.stallReason(&ins, job, reg, now); reason != "" {
-			s.finalizeReaped(&ins, reason, job)
+	if len(unboundList) > 0 {
+		unboundJobs := s.loadJobs(unboundList)
+		for i := range unboundList {
+			ins := unboundList[i]
+			job := unboundJobs[ins.JobID]
+			if job == nil {
+				s.finalizeReaped(&ins, "job 不存在,失败转移", nil)
+				continue
+			}
+			s.finalizeReaped(&ins, "worker 无法处理已解绑", job)
 		}
 	}
 }
@@ -579,9 +622,16 @@ func (s *Scheduler) reapOnce(reg *workerreg.Registry) {
 // finalizeReaped 标记实例 failed + 释放槽 + 调度重试(设 next_retry_time)。
 // job 透传给 scheduleRetry(reaper 路径已 loadJobs,避免重复 Job.Get);nil 时 scheduleRetry 自查。
 func (s *Scheduler) finalizeReaped(ins *domain.Instance, reason string, job *domain.Job) {
-	if err := s.store.Instance.UpdateResult(ins.ID, domain.StatusFailed, reason); err != nil {
+	ins.Status = domain.StatusFailed
+	ins.Result = reason                                    // payload 快照
+	cb := s.cbBuilder.Build(ins, job, domain.StatusFailed) // job 可能为 nil(reaper 兜底分支),Build 返回 nil
+	rows, err := s.store.Instance.UpdateResultWithCallback(ins.ID, domain.StatusFailed, reason, cb)
+	if err != nil {
 		s.log.Error("reaper 标记失败", "instance_id", ins.ID, "err", err)
 		return
+	}
+	if rows == 0 {
+		return // 已被并发终结(worker 迟到回报 / RecoverStaleActive),不重复 Release/scheduleRetry
 	}
 	s.appendLogRaw(ins, "REAP", "error", "失败转移: "+reason)
 	s.ReleaseInFlight(ins.ID)
@@ -596,6 +646,10 @@ func (s *Scheduler) finalizeReaped(ins *domain.Instance, reason string, job *dom
 // 否则唯一能兜底的只有 worker 心跳真的停掉(失联判定)。
 func (s *Scheduler) stallReason(ins *domain.Instance, job *domain.Job, reg *workerreg.Registry, now time.Time) string {
 	if ins.WorkerAddress == "" {
+		// 选后即绑后,正常派发不会出现「已派发态却无 worker 绑定」:MarkDispatched 先写 worker_address
+		// 再置 waiting_receive。命中此分支必为异常(worker 对未绑定实例乱回报 / SetStatus / 迁移脏数据),
+		// 应立即回收(→ reaper failed → scheduleRetry)。不再给 30s 宽限:它既兜不住崩溃恢复
+		// (RecoverStaleActive 在重启时接管,此时 TriggerTime 已远超窗口),反而延迟真正卡死实例的检测。
 		return "实例缺少 worker 绑定"
 	}
 	if reg != nil && !reg.IsOnline(ins.AppID, ins.WorkerAddress) {
@@ -671,7 +725,9 @@ func (s *Scheduler) retryInstance(ctx context.Context, job *domain.Job, orig *do
 		Tag:               orig.Tag,
 		JobInstanceParams: orig.JobInstanceParams,
 	}
-	if err := s.store.Instance.Create(retryIns); err != nil {
+	if err := s.store.Instance.CreateWithCallback(retryIns, func() *domain.Callback {
+		return s.cbBuilder.Build(retryIns, job, domain.StatusQueued)
+	}); err != nil {
 		s.log.Error("创建重试实例失败", "orig", orig.ID, "err", err)
 		s.releaseByJob(job.ID)
 		return
@@ -679,16 +735,9 @@ func (s *Scheduler) retryInstance(ctx context.Context, job *domain.Job, orig *do
 	s.appendLogRaw(retryIns, "RETRY", "info",
 		"重试派发 retry_index="+strconv.Itoa(retryIns.RetryIndex)+" (from "+strconv.FormatInt(orig.ID, 10)+")")
 	s.bindHeld(retryIns.ID, job.ID)
-	res := s.executor.Dispatch(ctx, job, retryIns)
-	if res.Accepted {
-		_ = s.store.Instance.MarkDispatched(retryIns.ID, res.WorkerAddress)
-	} else {
-		_ = s.store.Instance.UpdateResult(retryIns.ID, domain.StatusFailed, res.Reason)
-		s.releaseByInstance(retryIns.ID)
-		// 派发失败(如瞬时无可用 worker)若仍有重试余力,交 RetryPump 后续重派——与 reaper 路径
-		// 一致,避免重试链因一次瞬时派发失败被提前终止(原实现直接定格 failed,白白耗光重试次数)。
-		// scheduleRetry 内部按 RetryIndex>=RetryCount 兜底,已达上限则定格终态 failed。
-		s.scheduleRetry(retryIns, job)
+	// 选后即绑派发(同 execute,详见 dispatchToWorker)。
+	if s.dispatchToWorker(ctx, job, retryIns, "重试派发") {
+		return
 	}
 }
 
@@ -712,6 +761,46 @@ func (s *Scheduler) scheduleRetry(ins *domain.Instance, job *domain.Job) {
 	if err := s.store.Instance.SetNextRetryTime(ins.ID, time.Now().Add(interval)); err != nil {
 		s.log.Error("设定重试时间失败", "instance_id", ins.ID, "err", err)
 	}
+}
+
+// dispatchToWorker 执行「选后即绑」派发:PickWorker → MarkDispatched → Send。
+// 选定后立即 MarkDispatched 绑定 worker_address(先于 POST),消除「worker 回报 running 早于绑定」的竞态。
+// 任一步失败由 failDispatch 统一善后(UpdateResult failed + STATUS 日志 + 释放槽 + 衔接 RetryPump 重试)并返回 true;
+// 调用方收到 true 应直接 return。prefix 标识来源(「派发」/「手动触发派发」/「重试派发」),用于日志文案。
+// RetryCount=0 时 failDispatch 内 scheduleRetry 定格 failed 无副作用,故对不重试的 job 行为不变。
+func (s *Scheduler) dispatchToWorker(ctx context.Context, job *domain.Job, ins *domain.Instance, prefix string) (failed bool) {
+	addr, protocol, ok := s.executor.PickWorker(job, ins)
+	if !ok {
+		s.failDispatch(ins, job, prefix, "无可用 worker(tag 不匹配或全部离线)")
+		return true
+	}
+	ins.WorkerAddress = addr // payload 快照用(DB 由 MarkDispatched 写)
+	if _, err := s.store.Instance.MarkDispatchedWithCallback(ins.ID, addr, s.cbBuilder.Build(ins, job, domain.StatusWaitingReceive)); err != nil {
+		s.log.Error("标记派发失败", "instance_id", ins.ID, "err", err)
+		s.failDispatch(ins, job, prefix, "绑定 worker 失败: "+err.Error())
+		return true
+	}
+	s.appendLogRaw(ins, "DISPATCH", "info", prefix+"到 worker "+addr)
+	if err := s.executor.Send(ctx, addr, protocol, job, ins); err != nil {
+		s.failDispatch(ins, job, prefix, err.Error())
+		return true
+	}
+	return false
+}
+
+// failDispatch 派发失败统一善后:标记 failed(清 worker 绑定)+ 记 STATUS 日志 + 释放槽 + 衔接重试。
+func (s *Scheduler) failDispatch(ins *domain.Instance, job *domain.Job, prefix, reason string) {
+	ins.Status = domain.StatusFailed
+	ins.Result = reason // payload 快照
+	// 选后即绑下 Send 失败时 worker_address 已先于 POST commit;派发失败该绑定无意义,
+	// 用 FailDispatchWithCallback 在同事务清 worker_address/start_time + 置 failed,避免
+	// "failed 实例仍指向某 worker"的展示残留(与 worker 回报 failed 保留 worker 供审计区分)。
+	if _, err := s.store.Instance.FailDispatchWithCallback(ins.ID, reason, s.cbBuilder.Build(ins, job, domain.StatusFailed)); err != nil {
+		s.log.Error("标记派发失败失败", "instance_id", ins.ID, "err", err)
+	}
+	s.appendLogRaw(ins, "STATUS", "error", prefix+"失败→failed: "+reason)
+	s.releaseByInstance(ins.ID)
+	s.scheduleRetry(ins, job)
 }
 
 // ===== helpers =====

@@ -26,7 +26,16 @@ log:
   instance_retention_days: 0  # 实例日志保留天数;0=不自动清理(按文件 mtime 清理)
 
 scheduler:
-  interval_ms: 1000   # 调度/reaper/retry 扫描间隔(毫秒)
+  interval_ms: 1000   # 调度/reaper/retry/callback pump 扫描间隔(毫秒)
+  # 实例状态变更回调:Job 配 callback_url 时,实例每次状态变化 POST 通知,至少一次。
+  # SSRF 防御复用 worker.allowed_cidrs(未配则 callback 目标不限制,启动时 Warn 提示)。
+  callback:
+    enabled: true
+    max_attempts: 8
+    backoff_base_sec: 10
+    backoff_max_sec: 3600
+    timeout_sec: 10
+    retention_days: 7
 
 worker:
   timeout_seconds: 600   # worker 心跳超时(秒),超过视为离线(reaper 据此失败转移)。默认 10 分钟

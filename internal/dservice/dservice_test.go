@@ -38,7 +38,7 @@ func newSvc(t *testing.T) (*repository.Store, *dispatch.Scheduler, *instancelog.
 	}
 	reg := workerreg.New(time.Minute, nil)
 	il := instancelog.New(t.TempDir(), 0)
-	sch := dispatch.NewScheduler(st, dispatch.New(reg, time.Second), il, 50*time.Millisecond, discardLog())
+	sch := dispatch.NewScheduler(st, dispatch.New(reg, time.Second), il, 50*time.Millisecond, discardLog(), dispatch.NoopCallbackBuilder{})
 	return st, sch, il
 }
 
@@ -72,7 +72,7 @@ func TestAppDeleteInUse(t *testing.T) {
 	st, sch, _ := newSvc(t)
 	appSvc, jobSvc := NewAppService(st), NewJobService(st, sch)
 	app, _ := appSvc.Create("a", "p", 0)
-	job := &domain.Job{AppID: app.ID, Name: "j", ExecuteType: "http", ScheduleKind: "manual", Enabled: true}
+	job := &domain.Job{AppID: app.ID, Name: "j", ExecuteType: "http", ScheduleKind: "api", Enabled: true}
 	if err := jobSvc.Create(job); err != nil {
 		t.Fatal(err)
 	}
@@ -112,14 +112,56 @@ func TestJobCreateNextRun(t *testing.T) {
 	}
 }
 
+// validateJob:start_time 晚于 end_time → 报错(生效窗口非法)。
+func TestJobValidateWindow(t *testing.T) {
+	st, sch, _ := newSvc(t)
+	jobSvc := NewJobService(st, sch)
+	appSvc := NewAppService(st)
+	app, _ := appSvc.Create("a", "p", 0)
+
+	start := time.Now().Add(time.Hour)
+	end := time.Now()
+	if err := jobSvc.Create(&domain.Job{AppID: app.ID, Name: "j", ExecuteType: "http",
+		ScheduleKind: "cron", ScheduleExpr: "*/1 * * * *",
+		StartTime: &start, EndTime: &end, Enabled: true}); err == nil {
+		t.Fatal("start_time 晚于 end_time 应报错")
+	}
+}
+
+// Update 清空 start_time(fields 值为 *time.Time nil) → gorm map 应写 NULL,确认清空生效。
+// 回归:own 时间戳 0=清空 依赖 gorm 对 map nil 写 NULL(非跳过)。
+func TestJobUpdateClearStartTime(t *testing.T) {
+	st, sch, _ := newSvc(t)
+	jobSvc := NewJobService(st, sch)
+	appSvc := NewAppService(st)
+	app, _ := appSvc.Create("a", "p", 0)
+	start := time.Now().Add(time.Hour)
+	j := &domain.Job{AppID: app.ID, Name: "j", ExecuteType: "http",
+		ScheduleKind: "cron", ScheduleExpr: "*/1 * * * *", StartTime: &start, Enabled: true}
+	if err := jobSvc.Create(j); err != nil {
+		t.Fatal(err)
+	}
+	// own UpdateJobReqToFields 对 ms<=0 产出 (*time.Time)(nil)
+	if err := jobSvc.Update(app.ID, j.ID, map[string]any{"start_time": (*time.Time)(nil)}); err != nil {
+		t.Fatalf("Update 失败: %v", err)
+	}
+	got, err := st.Job.Get(app.ID, j.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.StartTime != nil {
+		t.Fatalf("start_time 应被清空(nil), got %v", got.StartTime)
+	}
+}
+
 // Trigger:经 SubmitManual 产生 queued 实例。
 func TestJobTrigger(t *testing.T) {
 	st, sch, il := newSvc(t)
 	jobSvc := NewJobService(st, sch)
-	insSvc := NewInstanceService(st, sch, il)
+	insSvc := NewInstanceService(st, sch, il, dispatch.NoopCallbackBuilder{})
 	appSvc := NewAppService(st)
 	app, _ := appSvc.Create("a", "p", 0)
-	job := &domain.Job{AppID: app.ID, Name: "j", ExecuteType: "http", ScheduleKind: "manual", Enabled: true}
+	job := &domain.Job{AppID: app.ID, Name: "j", ExecuteType: "http", ScheduleKind: "api", Enabled: true}
 	_ = jobSvc.Create(job)
 
 	// 手动触发需要一个在线 worker 让 dispatcher 派出去;这里只验证 SubmitManual 落库 queued
@@ -143,7 +185,7 @@ func TestJobTrigger(t *testing.T) {
 // ReportStatus:终态守护 + 白名单;终态时 ReleaseInFlight(幂等,无槽也安全)。
 func TestInstanceReportStatus(t *testing.T) {
 	st, sch, il := newSvc(t)
-	insSvc := NewInstanceService(st, sch, il)
+	insSvc := NewInstanceService(st, sch, il, dispatch.NoopCallbackBuilder{})
 	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
 	ins := &domain.Instance{JobID: 1, AppID: 1, Status: domain.StatusRunning}
 	_ = st.Instance.Create(ins)
@@ -164,7 +206,7 @@ func TestInstanceReportStatus(t *testing.T) {
 	}
 }
 
-// Update:调度字段变化时重算 next_run(manual→cron、禁用→启用 否则会永不触发);
+// Update:调度字段变化时重算 next_run(api→cron、禁用→启用 否则会永不触发);
 // 非调度字段更新不重算;非法 cron 报错。
 func TestJobUpdateReschedules(t *testing.T) {
 	st, sch, _ := newSvc(t)
@@ -172,13 +214,13 @@ func TestJobUpdateReschedules(t *testing.T) {
 	appSvc := NewAppService(st)
 	app, _ := appSvc.Create("a", "p", 0)
 
-	// manual+enabled 创建 → 无 next_run
-	j := &domain.Job{AppID: app.ID, Name: "j", ExecuteType: "http", ScheduleKind: "manual", Enabled: true}
+	// api+enabled 创建 → 无 next_run
+	j := &domain.Job{AppID: app.ID, Name: "j", ExecuteType: "http", ScheduleKind: "api", Enabled: true}
 	if err := jobSvc.Create(j); err != nil {
 		t.Fatal(err)
 	}
 	if j.NextRunTime != nil {
-		t.Fatal("manual 应无 next_run_time")
+		t.Fatal("api 应无 next_run_time")
 	}
 
 	// 改成 cron → 应重算出 next_run(否则永不触发)
