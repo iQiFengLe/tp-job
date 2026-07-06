@@ -5,27 +5,35 @@
 package own
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"task-schedule/internal/auth"
 	"task-schedule/internal/dservice"
+	"task-schedule/internal/protocol/powerjob"
 	"task-schedule/internal/repository"
 	"task-schedule/internal/workerreg"
 )
 
 // Deps own 协议依赖。
 type Deps struct {
-	Apps      *dservice.AppService
-	Jobs      *dservice.JobService
-	Instances *dservice.InstanceService
-	Store     *repository.Store
+	Apps       *dservice.AppService
+	Jobs       *dservice.JobService
+	Instances  *dservice.InstanceService
+	Store      *repository.Store
+	AdminUsers *dservice.AdminUserService // /account/* 用;其余路由可空
 
 	// Reg worker 心跳注册表(读在线 worker 列表)。为 nil 时 listWorkers 返回空(单测场景)。
 	Reg *workerreg.Registry
+
+	// PowerJobClient 用于"从 PowerJob 同步任务"(admin 主动拉取外部 PowerJob server)。
+	// 为 nil 时 import-powerjob 端点返回 503(未装配,如单测)。
+	PowerJobClient *powerjob.Client
 
 	// Auth 非 nil 时,Register 给路由按权限矩阵挂鉴权中间件(SessionAuth + RequireAdmin/AppScope);
 	// 为 nil 则不鉴权(单测/未装配场景,向后兼容)。
@@ -57,6 +65,7 @@ func ownRoutes(d Deps) []routeDef {
 		{"PUT", "/apps/:appId/jobs/:id", d.updateJob, false},
 		{"DELETE", "/apps/:appId/jobs/:id", d.deleteJob, false},
 		{"POST", "/apps/:appId/jobs/:id/trigger", d.triggerJob, false},
+		{"POST", "/apps/:appId/jobs/import-powerjob", d.importPowerJob, true}, // admin:SSRF 风险
 
 		{"GET", "/apps/:appId/instances", d.listInstances, false},
 		{"GET", "/apps/:appId/instances/:iid", d.getInstance, false},
@@ -236,6 +245,29 @@ func (d Deps) triggerJob(c *gin.Context) {
 		return
 	}
 	ok(c, gin.H{"id": id, "triggered": true, "priority": priority})
+}
+
+// importPowerJob POST /apps/:appId/jobs/import-powerjob(仅 admin):
+// 作为 PowerJob OpenAPI 客户端拉取外部 server 的 job 定义,转换并 upsert 到当前 app。
+// dry_run=true 仅预览不落库。SSRF 防护由装配层注入的 Transport(PowerJobClient.http)保证。
+func (d Deps) importPowerJob(c *gin.Context) {
+	var req ImportPowerJobReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	if d.PowerJobClient == nil {
+		fail(c, http.StatusServiceUnavailable, "PowerJob 同步客户端未装配")
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+	pjs, err := d.PowerJobClient.FetchJobs(ctx, req.ServerAddress, req.AppName, req.Password, req.Token)
+	if err != nil {
+		fail(c, http.StatusBadRequest, "拉取 PowerJob 任务失败: "+err.Error())
+		return
+	}
+	ok(c, d.importJobs(paramInt64(c, "appId"), fingerprint(req.ServerAddress), pjs, req.DryRun))
 }
 
 // ===== Instance =====

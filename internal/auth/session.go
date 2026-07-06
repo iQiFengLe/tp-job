@@ -26,6 +26,7 @@ const (
 type Session struct {
 	Token     string    // 随机 token(作 Authorization: Bearer)
 	Role      Role      // admin | app
+	UserID    int64     // admin=admin_user.id(改密/改名 handler 定位账户用);app=0
 	AppID     int64     // app 角色=所属 app id;admin=0
 	AppName   string    // app 角色=app 名;admin=""
 	Username  string    // 管理员用户名(app 角色同 AppName,便于统一展示)

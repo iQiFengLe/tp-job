@@ -84,24 +84,41 @@ func (f *fakeVerifier) Verify(name, password string) (*domain.App, error) {
 	return nil, errors.New("unauthorized")
 }
 
-func newLogin(t *testing.T) (*LoginService, *Store, *fakeVerifier) {
+// fakeAdminLookup 桩 AdminUserLookup:仅 "admin" 命中(密码哈希预算好),其余 (nil,nil) 未命中。
+type fakeAdminLookup struct {
+	calls int
+	hash  string
+}
+
+func newFakeAdminLookup(t *testing.T) *fakeAdminLookup {
+	t.Helper()
+	return &fakeAdminLookup{hash: mustHash(t, "admin-pw")}
+}
+
+func (f *fakeAdminLookup) Lookup(username string) (*domain.AdminUser, error) {
+	f.calls++
+	if username == "admin" {
+		return &domain.AdminUser{ID: 1, Username: "admin", Password: f.hash}, nil
+	}
+	return nil, nil
+}
+
+func newLogin(t *testing.T) (*LoginService, *Store, *fakeVerifier, *fakeAdminLookup) {
 	t.Helper()
 	store := NewStore(time.Hour)
 	apps := &fakeVerifier{}
-	ls := NewLoginService(
-		[]AdminCredential{{Username: "admin", PasswordHash: mustHash(t, "admin-pw")}},
-		apps, store,
-	)
-	return ls, store, apps
+	admins := newFakeAdminLookup(t)
+	ls := NewLoginService(admins, apps, store)
+	return ls, store, apps, admins
 }
 
 func TestLoginAdminSuccess(t *testing.T) {
-	ls, store, _ := newLogin(t)
+	ls, store, _, _ := newLogin(t)
 	sess, err := ls.Login("admin", "admin-pw")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sess.Role != RoleAdmin || sess.Username != "admin" {
+	if sess.Role != RoleAdmin || sess.Username != "admin" || sess.UserID != 1 {
 		t.Fatalf("admin session 字段不符: %+v", sess)
 	}
 	if _, ok := store.Get(sess.Token); !ok {
@@ -110,7 +127,7 @@ func TestLoginAdminSuccess(t *testing.T) {
 }
 
 func TestLoginAdminWrongPassword(t *testing.T) {
-	ls, _, _ := newLogin(t)
+	ls, _, _, _ := newLogin(t)
 	if _, err := ls.Login("admin", "wrong"); !errors.Is(err, ErrLoginFailed) {
 		t.Fatalf("admin 密码错应 ErrLoginFailed, got %v", err)
 	}
@@ -118,15 +135,37 @@ func TestLoginAdminWrongPassword(t *testing.T) {
 
 func TestLoginAdminDoesNotFallThroughToApp(t *testing.T) {
 	// 命中管理员用户名但密码错:不应回退到应用登录(避免同名应用凭据意外通过)。
-	ls, _, apps := newLogin(t)
+	ls, _, apps, _ := newLogin(t)
 	_, _ = ls.Login("admin", "wrong")
 	if apps.calls != 0 {
 		t.Fatalf("admin 用户名匹配时不应调用 app 校验, got calls=%d", apps.calls)
 	}
 }
 
+// errAdminLookup 桩:Lookup 恒返回 DB 错误(模拟 admin_user 表查询故障)。
+type errAdminLookup struct{}
+
+func (errAdminLookup) Lookup(string) (*domain.AdminUser, error) {
+	return nil, errors.New("db down")
+}
+
+func TestLoginAdminLookupErrorNoFallback(t *testing.T) {
+	// Lookup 返回 DB 错:不回退 app 分支(保"命中管理员用户名即不回退"防同名语义),
+	// 直接 ErrLoginFailed——即便存在可被 app 分支通过的同名 app(app1/secret)。
+	store := NewStore(time.Hour)
+	apps := &fakeVerifier{}
+	ls := NewLoginService(errAdminLookup{}, apps, store)
+	_, err := ls.Login("app1", "secret")
+	if !errors.Is(err, ErrLoginFailed) {
+		t.Fatalf("Lookup DB 错应 ErrLoginFailed, got %v", err)
+	}
+	if apps.calls != 0 {
+		t.Fatalf("Lookup DB 错不应回退 app 校验, got calls=%d", apps.calls)
+	}
+}
+
 func TestLoginAppSuccess(t *testing.T) {
-	ls, store, _ := newLogin(t)
+	ls, store, _, _ := newLogin(t)
 	sess, err := ls.Login("app1", "secret")
 	if err != nil {
 		t.Fatal(err)
@@ -140,7 +179,7 @@ func TestLoginAppSuccess(t *testing.T) {
 }
 
 func TestLoginAppFail(t *testing.T) {
-	ls, _, _ := newLogin(t)
+	ls, _, _, _ := newLogin(t)
 	for _, c := range []struct{ name, pwd string }{
 		{"app1", "wrong"}, {"ghost", "secret"},
 	} {
@@ -151,7 +190,7 @@ func TestLoginAppFail(t *testing.T) {
 }
 
 func TestLoginUnknownIdentity(t *testing.T) {
-	ls, _, _ := newLogin(t)
+	ls, _, _, _ := newLogin(t)
 	if _, err := ls.Login("nobody", "x"); !errors.Is(err, ErrLoginFailed) {
 		t.Fatalf("未知身份应 ErrLoginFailed, got %v", err)
 	}

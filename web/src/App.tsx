@@ -25,7 +25,7 @@ export default function App() {
   useEffect(() => {
     const autoLogin = () =>
       api.auth
-        .login({ ident: 'admin', password: 'change-me-admin' })
+        .login({ ident: 'admin', password: 'admin123' })
         .then((resp) => {
           saveToken(resp.token);
           setToken(resp.token);
@@ -75,5 +75,5 @@ export default function App() {
   if (!me) {
     return <LoginView onLoggedIn={onLoggedIn} />;
   }
-  return <Console me={me} onLoggedOut={onLoggedOut} />;
+  return <Console me={me} onLoggedOut={onLoggedOut} onUsernameChange={(u) => setMe((prev) => (prev ? { ...prev, username: u } : prev))} />;
 }

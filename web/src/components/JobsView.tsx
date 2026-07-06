@@ -1,4 +1,4 @@
-import {DeleteOutlined, EditOutlined, PlayCircleOutlined, PlusOutlined, ReloadOutlined} from '@ant-design/icons';
+import {CloudSyncOutlined, DeleteOutlined, EditOutlined, PlayCircleOutlined, PlusOutlined, ReloadOutlined} from '@ant-design/icons';
 import {App as AntApp, Button, Form, Popconfirm, Space, Table, Tag, Tooltip, Typography} from 'antd';
 import type {ColumnsType} from 'antd/es/table';
 import dayjs from 'dayjs';
@@ -8,12 +8,13 @@ import {PAGE_SIZE, compactObject, formatTime} from '../lib';
 import {formatScheduleExpr, isAutoKind, scheduleExprFromForm, scheduleKindOptions} from '../schedule';
 import type {JobCreateValues, JobUpdateValues, JobView} from '../types';
 import AppGate from './AppGate';
+import ImportPowerJobModal from './ImportPowerJobModal';
 import JobDetailDrawer from './JobDetailDrawer';
 import JobModal from './JobModal';
 
 const {Text, Title} = Typography;
 
-export default function JobsView(props: { appId?: number; onError: (error: unknown) => void }) {
+export default function JobsView(props: { appId?: number; isAdmin?: boolean; onError: (error: unknown) => void }) {
     const {message} = AntApp.useApp();
     const [form] = Form.useForm();
     const [jobs, setJobs] = useState<JobView[]>([]);
@@ -24,6 +25,7 @@ export default function JobsView(props: { appId?: number; onError: (error: unkno
     const [modalOpen, setModalOpen] = useState(false);
     const [editingJob, setEditingJob] = useState<JobView>();
     const [detailJob, setDetailJob] = useState<JobView>();
+    const [importOpen, setImportOpen] = useState(false);
 
     const load = async (p = page, s = size) => {
         if (!props.appId) return;
@@ -206,6 +208,11 @@ export default function JobsView(props: { appId?: number; onError: (error: unkno
                 <Button icon={<ReloadOutlined/>} onClick={() => load()} loading={loading}>
                     刷新
                 </Button>
+                {props.isAdmin && (
+                    <Button icon={<CloudSyncOutlined/>} onClick={() => setImportOpen(true)} disabled={!props.appId}>
+                        从 PowerJob 导入
+                    </Button>
+                )}
             </div>
             <Table
                 rowKey="id"
@@ -229,6 +236,16 @@ export default function JobsView(props: { appId?: number; onError: (error: unkno
             <JobModal open={modalOpen} editingJob={editingJob} form={form} onCancel={() => setModalOpen(false)}
                       onOk={submit}/>
             <JobDetailDrawer job={detailJob} onClose={() => setDetailJob(undefined)}/>
+            <ImportPowerJobModal
+                open={importOpen}
+                appId={props.appId}
+                onClose={() => setImportOpen(false)}
+                onImported={() => {
+                    message.success('任务列表已刷新');
+                    load();
+                }}
+                onError={props.onError}
+            />
         </section>
     );
 }

@@ -62,17 +62,29 @@ func LoginHandler(login *auth.LoginService) gin.HandlerFunc {
 
 // RegisterAuth 挂载 /auth/me、/auth/logout。两条路由各自前置 SessionAuth(与公开的 login
 // 可共用同一 /api group,互不干扰)。logout 幂等。
-func RegisterAuth(r *gin.RouterGroup, store *auth.Store) {
-	r.GET("/auth/me", auth.SessionAuth(store), meHandler)
-	r.POST("/auth/logout", auth.SessionAuth(store), logoutHandler(store))
+//
+// me 对 admin 角色实时查 AdminUsers 取最新用户名(改名后刷新页面即正确,不依赖登录时的 session
+// 快照);AdminUsers 为 nil(未装配)时回退 session 快照。
+func RegisterAuth(r *gin.RouterGroup, d Deps) {
+	r.GET("/auth/me", auth.SessionAuth(d.Auth), meHandler(d))
+	r.POST("/auth/logout", auth.SessionAuth(d.Auth), logoutHandler(d.Auth))
 }
 
-func meHandler(c *gin.Context) {
-	sess, _ := auth.SessionFrom(c)
-	ok(c, MeResp{
-		Role: string(sess.Role), Username: sess.Username,
-		AppID: sess.AppID, AppName: sess.AppName,
-	})
+func meHandler(d Deps) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		sess, _ := auth.SessionFrom(c)
+		resp := MeResp{
+			Role: string(sess.Role), Username: sess.Username,
+			AppID: sess.AppID, AppName: sess.AppName,
+		}
+		// admin 角色取库内最新用户名;查询失败或未装配时回退 session 快照(不影响响应)。
+		if sess.Role == auth.RoleAdmin && d.AdminUsers != nil {
+			if u, err := d.AdminUsers.Profile(sess.UserID); err == nil {
+				resp.Username = u.Username
+			}
+		}
+		ok(c, resp)
+	}
 }
 
 func logoutHandler(store *auth.Store) gin.HandlerFunc {

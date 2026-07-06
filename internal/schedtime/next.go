@@ -5,30 +5,48 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/reugn/go-quartz/quartz"
 	"github.com/robfig/cron/v3"
 )
 
-// 标准 5 段 cron + 部分描述符(@ hourly 等)，与多数运维预期一致。
+// 标准 5 段 cron + 部分描述符(@ hourly 等),与多数运维预期一致。
+// 仅消费自建 job(Web 表单填的标准 cron)。PowerJob/Quartz 6~7 段表达式(含秒/年/?/L/W/#)
+// 走 go-quartz 引擎,见 NextCron/ValidateCron。
 var defaultParser = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 
-// ValidateCron 校验 cron 表达式是否合法。
+// ValidateCron 校验 cron 表达式合法性(双引擎):
+//  1. robfig 5 段 + Descriptor(自建 cron 优先,语义不变);
+//  2. go-quartz Quartz 6/7 段(含秒/年/?/L/W/#,PowerJob 同步任务用)。
 func ValidateCron(expr string) error {
 	if expr == "" {
 		return fmt.Errorf("cron 表达式不能为空")
 	}
-	if _, err := defaultParser.Parse(expr); err != nil {
+	if _, err := defaultParser.Parse(expr); err == nil {
+		return nil
+	}
+	if _, err := quartz.NewCronTrigger(expr); err != nil {
 		return fmt.Errorf("非法 cron 表达式 %q: %w", expr, err)
 	}
 	return nil
 }
 
-// NextCron 返回 cron 表达式在 from 之后的下一次触发时间。
+// NextCron 返回 cron 表达式在 from 之后的下一次触发时间(双引擎,见 ValidateCron)。
+// Quartz 引擎用 time.Local,与 robfig(sch.Next 沿用 from 的 loc,from=time.Now() 即 Local)
+// 对齐,确保业务时区(如 Asia/Shanghai)写入的"9 点"按本地时区触发。
+// 无未来触发(如 Quartz 一次性 cron 已过期)→ 返回 error,调用方据此置 next_run=nil。
 func NextCron(expr string, from time.Time) (time.Time, error) {
-	sch, err := defaultParser.Parse(expr)
+	if sch, err := defaultParser.Parse(expr); err == nil {
+		return sch.Next(from), nil
+	}
+	trigger, err := quartz.NewCronTriggerWithLoc(expr, time.Local)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("非法 cron 表达式 %q: %w", expr, err)
 	}
-	return sch.Next(from), nil
+	nextNs, err := trigger.NextFireTime(from.UnixNano()) // go-quartz 入参/返回均为 UnixNano
+	if err != nil {
+		return time.Time{}, fmt.Errorf("cron %q 无未来触发时间: %w", expr, err)
+	}
+	return time.Unix(0, nextNs).In(time.Local), nil
 }
 
 // NextByKind 按统一 ScheduleKind 计算下次执行时间(domain 模型用)。

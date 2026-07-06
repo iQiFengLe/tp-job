@@ -1,9 +1,9 @@
 # 任务调度服务配置(统一 worker 派发模型)
-# 敏感配置(管理员密码、mysql dsn)推荐用环境变量覆盖,见文末「环境变量」表。
+# 敏感配置(mysql dsn)推荐用环境变量覆盖,见文末「环境变量」表。管理员账户走数据库表。
 
 server:
   port: 8080
-  mode: debug            # gin 模式: debug / release / test。release 拒绝默认管理员密码启动(见 auth)
+  mode: debug            # gin 模式: debug / release / test。release 要求显式配置 auth.login.max_attempts_per_min
   max_request_body_mb: 2 # 请求体大小上限(MB)
 
 database:
@@ -50,23 +50,18 @@ powerjob:
   server_address: "127.0.0.1:8080"   # /server/acquire 返回值;必须是 PowerJob Worker 可达的 host:port
 
 auth:
-  # 管理员账户(配置注入,不入库)。release 模式下保留默认占位密码会【拒绝启动】。
-  # 开发:整段省略 admins(或留空)则自动种入占位账户 admin / change-me-admin(debug 可用)。
-  # 生产:填 bcrypt 哈希;或用环境变量 TASK_SCHEDULE_ADMIN_USERNAME / TASK_SCHEDULE_ADMIN_PASSWORD 注入明文(加载时 bcrypt)。
-  # admins:
-  #   - username: admin
-  #     password: "$2a$10$...."   # bcrypt 哈希
+  # 管理员账户存 admin_user 表(首次启动自动 seed 默认账户 admin/admin123),
+  # 用户名与密码均可在 Web 顶部「账户设置」菜单修改。此处不再支持配置文件/环境变量注入。
   session:
     ttl_seconds: 86400   # 登录会话有效期(秒)
   # 登录限流(防爆破 + bcrypt 资源放大 DoS)。每 IP 每分钟最大尝试次数;0=不限(开发默认)。
-  # 生产建议设 10~20。release 模式强制要求显式配置(<=0 启动被拒,同"拒默认密码"防呆)。
+  # 生产建议设 10~20。release 模式强制要求显式配置(<=0 启动被拒)。
   # login:
   #   max_attempts_per_min: 10
 
 # 环境变量(优先级高于本文件,便于容器/CI 注入,避免明文落盘):
-#   TASK_SCHEDULE_ADMIN_USERNAME          → auth.admins[0].username
-#   TASK_SCHEDULE_ADMIN_PASSWORD          → auth.admins[0].password(明文,加载时 bcrypt)
 #   TASK_SCHEDULE_DB_DRIVER               → database.driver (sqlite|mysql)
 #   TASK_SCHEDULE_MYSQL_DSN               → database.mysql.dsn
 #   TASK_SCHEDULE_SERVER_MODE             → server.mode (debug|release|test)
 #   TASK_SCHEDULE_POWERJOB_SERVER_ADDRESS → powerjob.server_address
+# 注:管理员账户已迁入数据库(admin_user 表),不再支持环境变量注入;默认 admin/admin123,Web 可改。

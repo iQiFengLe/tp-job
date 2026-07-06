@@ -1,8 +1,13 @@
 import type {
+  AccountChangePasswordReq,
+  AccountProfile,
+  AccountUpdateProfileReq,
   ApiBody,
   AppCreateValues,
   AppUpdateValues,
   AppView,
+  ImportPowerJobReq,
+  ImportPowerJobResp,
   InstanceView,
   JobCreateValues,
   JobUpdateValues,
@@ -88,6 +93,14 @@ export const api = {
     logout: () => request<{ logged_out: boolean }>('/api/auth/logout', { method: 'POST' }),
   },
 
+  account: {
+    profile: () => request<AccountProfile>('/api/account/profile'),
+    updateProfile: (v: AccountUpdateProfileReq) =>
+      request<{ id: number }>('/api/account/profile', { method: 'PUT', body: JSON.stringify(v) }),
+    changePassword: (v: AccountChangePasswordReq) =>
+      request<{ id: number }>('/api/account/password', { method: 'PUT', body: JSON.stringify(v) }),
+  },
+
   apps: {
     list: (params: { keyword?: string; page?: number; size?: number }) =>
       request<PageResult<AppView>>(`/api/apps${qs(params)}`),
@@ -112,6 +125,11 @@ export const api = {
         `/api/apps/${appId}/jobs/${id}/trigger${qs(params)}`,
         { method: 'POST' },
       ),
+    importPowerJob: (appId: number, req: ImportPowerJobReq) =>
+      request<ImportPowerJobResp>(`/api/apps/${appId}/jobs/import-powerjob`, {
+        method: 'POST',
+        body: JSON.stringify(req),
+      }),
   },
 
   instances: {

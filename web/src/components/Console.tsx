@@ -1,10 +1,11 @@
-import { ApiOutlined, AppstoreOutlined, BugOutlined, ClockCircleOutlined, CloudServerOutlined, LogoutOutlined } from '@ant-design/icons';
-import { Badge, Button, Layout, Menu, Select, Space, Tag } from 'antd';
+import { ApiOutlined, AppstoreOutlined, BugOutlined, ClockCircleOutlined, CloudServerOutlined, DownOutlined, LogoutOutlined, UserOutlined } from '@ant-design/icons';
+import { Badge, Button, Dropdown, Layout, Menu, Select, Space, Tag } from 'antd';
 import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { useErrorHandler } from '../hooks';
 import ThemeSwitcher from '../theme/ThemeSwitcher';
 import type { AppView, MeResp } from '../types';
+import AccountModal from './AccountModal';
 import AppsView from './AppsView';
 import InstancesView from './InstancesView';
 import JobsView from './JobsView';
@@ -14,7 +15,11 @@ const { Header, Sider, Content } = Layout;
 
 type ViewKey = 'apps' | 'jobs' | 'instances' | 'workers';
 
-export default function Console(props: { me: MeResp; onLoggedOut: () => void }) {
+export default function Console(props: {
+  me: MeResp;
+  onLoggedOut: () => void;
+  onUsernameChange: (username: string) => void;
+}) {
   const handleError = useErrorHandler();
   const { me } = props;
   const isAdmin = me.role === 'admin';
@@ -23,6 +28,7 @@ export default function Console(props: { me: MeResp; onLoggedOut: () => void }) 
   const [selectedAppId, setSelectedAppId] = useState<number | undefined>(me.app_id);
   const [appsLoading, setAppsLoading] = useState(false);
   const [health, setHealth] = useState<{ status: string; driver: string }>();
+  const [accountOpen, setAccountOpen] = useState(false);
 
   const loadApps = async () => {
     if (!isAdmin) return;
@@ -107,6 +113,15 @@ export default function Console(props: { me: MeResp; onLoggedOut: () => void }) 
             <Tag color={isAdmin ? 'gold' : 'geekblue'} style={{ fontWeight: 500, padding: '4px 12px' }}>
               {isAdmin ? '管理员' : '应用'}
             </Tag>
+            <Dropdown
+              menu={{
+                items: [{ key: 'account', label: '账户设置', onClick: () => setAccountOpen(true) }],
+              }}
+            >
+              <Button type="text" style={{ fontWeight: 500 }}>
+                <UserOutlined /> {me.username} <DownOutlined />
+              </Button>
+            </Dropdown>
             <ThemeSwitcher />
             <Button icon={<LogoutOutlined />} onClick={props.onLoggedOut} style={{ fontWeight: 500 }}>
               登出
@@ -116,12 +131,18 @@ export default function Console(props: { me: MeResp; onLoggedOut: () => void }) 
         <Content className="content">
           {view === 'apps' && isAdmin && <AppsView apps={apps} loading={appsLoading} onReload={loadApps} onError={handleError} />}
           {view === 'jobs' && (
-            <JobsView appId={currentAppId} onError={handleError} />
+            <JobsView appId={currentAppId} isAdmin={isAdmin} onError={handleError} />
           )}
           {view === 'instances' && <InstancesView appId={currentAppId} onError={handleError} />}
           {view === 'workers' && <WorkersView appId={currentAppId} onError={handleError} />}
         </Content>
       </Layout>
+      <AccountModal
+        open={accountOpen}
+        username={me.username}
+        onUsernameChanged={props.onUsernameChange}
+        onClose={() => setAccountOpen(false)}
+      />
     </Layout>
   );
 }

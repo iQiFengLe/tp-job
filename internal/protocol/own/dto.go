@@ -98,8 +98,41 @@ type JobView struct {
 	CallbackURL      string `json:"callback_url,omitempty"`
 	Enabled          bool   `json:"enabled"`
 
+	FromID   string `json:"from_id,omitempty"`   // 来源 ID(自建=uuid,PowerJob=原 jobID)
+	FromType string `json:"from_type,omitempty"` // 来源类型(SELF / powerjob)
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// ===== PowerJob 同步导入 =====
+
+// ImportPowerJobReq 从外部 PowerJob server 拉取任务定义导入到当前 app。
+type ImportPowerJobReq struct {
+	ServerAddress string `json:"server_address" binding:"required"` // 如 http://host:7700
+	AppName       string `json:"app_name" binding:"required"`       // PowerJob app 名
+	Password      string `json:"password,omitempty"`                // 可选 app 密码(/appInfo/list 不可用时回退 assert 用)
+	Token         string `json:"token,omitempty"`                   // 可选 POWERJOB-TOKEN(4.3.3+)
+	DryRun        bool   `json:"dry_run"`                           // true=仅预览不落库
+}
+
+// ImportPowerJobItem 预览/结果明细。Error 非空表示该条转换/解析失败被跳过。
+type ImportPowerJobItem struct {
+	Name         string `json:"name"`
+	ScheduleKind string `json:"schedule_kind"`
+	ScheduleExpr string `json:"schedule_expr"`
+	Enabled      bool   `json:"enabled"`
+	Conflict     bool   `json:"conflict"` // true=当前 app 已有同源 job(将更新)
+	Error        string `json:"error,omitempty"`
+}
+
+// ImportPowerJobResp 导入结果。dry_run 时 Imported/Updated 为"预览将…",Skipped 为解析失败数。
+type ImportPowerJobResp struct {
+	Fetched  int                  `json:"fetched"`  // PowerJob 返回的 job 总数
+	Imported int                  `json:"imported"` // 新增数(dry_run=将新增)
+	Updated  int                  `json:"updated"`  // 更新数(dry_run=将更新)
+	Skipped  int                  `json:"skipped"`  // 跳过数(解析失败)
+	Preview  []ImportPowerJobItem `json:"preview"`
 }
 
 // ===== Instance =====
@@ -172,6 +205,7 @@ func JobToView(j *domain.Job) JobView {
 		MaxConcurrency: j.MaxConcurrency, MaxWaitSeconds: j.MaxWaitSeconds,
 		RetryCount: j.RetryCount, RetryIntervalSec: j.RetryIntervalSec,
 		DefaultPriority: j.DefaultPriority, CallbackURL: j.CallbackURL, Enabled: j.Enabled,
+		FromID: j.FromID, FromType: j.FromType,
 		CreatedAt: j.CreatedAt, UpdatedAt: j.UpdatedAt,
 	}
 }

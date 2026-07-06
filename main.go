@@ -75,8 +75,7 @@ func main() {
 	log.Info("配置加载完成",
 		"driver", cfg.Database.Driver,
 		"port", cfg.Server.Port,
-		"worker_timeout_s", cfg.Worker.TimeoutSeconds,
-		"admins", len(cfg.Auth.Admins))
+		"worker_timeout_s", cfg.Worker.TimeoutSeconds)
 
 	// 数据库 + 核心组件
 	st, err := repository.New(cfg.Database)
@@ -116,14 +115,15 @@ func main() {
 		log.Error("恢复 queued 实例失败", "err", err)
 	}
 
-	// 鉴权:会话 store + 登录服务(管理员配置 + app 表)
+	// 鉴权:会话 store + 登录服务(管理员 admin_user 表 + app 表)。
+	// 管理员账户已迁出 config.yaml/env,首次启动由 SeedDefault 在 admin_user 表种 admin/admin123。
 	authStore := auth.NewStore(time.Duration(cfg.Auth.Session.TTLSeconds) * time.Second)
-	admins := make([]auth.AdminCredential, 0, len(cfg.Auth.Admins))
-	for _, a := range cfg.Auth.Admins {
-		admins = append(admins, auth.AdminCredential{Username: a.Username, PasswordHash: a.Password})
+	adminUserSvc := dservice.NewAdminUserService(st)
+	if err := adminUserSvc.SeedDefault(); err != nil {
+		fail(err)
 	}
 	appSvc := dservice.NewAppService(st)
-	loginSvc := auth.NewLoginService(admins, appSvc, authStore)
+	loginSvc := auth.NewLoginService(adminUserSvc, appSvc, authStore)
 
 	// 业务服务
 	jobSvc := dservice.NewJobService(st, sch)
@@ -149,6 +149,14 @@ func main() {
 		}, time.Duration(cfg.Scheduler.IntervalMs)*time.Millisecond, cfg.Scheduler.Callback, log)
 		cbPump.Start(ctx)
 	}
+	// PowerJob 同步客户端:作为 OpenAPI 客户端拉取外部 PowerJob server 的任务定义。
+	// ServerAddress 由 admin 显式填写(import-powerjob 仅 admin 可调 + validateAddr 限 scheme),
+	// 与 worker 自上报地址(不可信,仍受 pol 保护)属不同信任类别——故 Transport 用 nil policy
+	// (放行),不绑 worker.allowed_cidrs,避免运维加固 worker 白名单时误伤 PowerJob 拉取。
+	pjClient := powerjob.NewClient(&http.Client{
+		Timeout:   30 * time.Second,
+		Transport: dispatch.NewSSRFTransport(nil, 15*time.Second),
+	})
 	var bg sync.WaitGroup
 	runBG := func(fn func()) {
 		bg.Add(1)
@@ -162,9 +170,10 @@ func main() {
 	webFS := resolveWebFS()
 	handler := buildRouter(routerDeps{
 		cfg: cfg, st: st,
-		appSvc: appSvc, jobSvc: jobSvc, insSvc: insSvc,
+		appSvc: appSvc, adminUserSvc: adminUserSvc, jobSvc: jobSvc, insSvc: insSvc,
 		reg: reg, il: il, authStore: authStore, loginSvc: loginSvc,
-		webFS: webFS,
+		pjClient: pjClient,
+		webFS:    webFS,
 	})
 	httpSrv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Server.Port),
@@ -226,16 +235,18 @@ func main() {
 
 // routerDeps buildRouter 的装配依赖。
 type routerDeps struct {
-	cfg       *config.Config
-	st        *repository.Store
-	appSvc    *dservice.AppService
-	jobSvc    *dservice.JobService
-	insSvc    *dservice.InstanceService
-	reg       *workerreg.Registry
-	il        *instancelog.Logger
-	authStore *auth.Store
-	loginSvc  *auth.LoginService
-	webFS     fs.FS
+	cfg          *config.Config
+	st           *repository.Store
+	appSvc       *dservice.AppService
+	adminUserSvc *dservice.AdminUserService
+	jobSvc       *dservice.JobService
+	insSvc       *dservice.InstanceService
+	reg          *workerreg.Registry
+	il           *instancelog.Logger
+	authStore    *auth.Store
+	loginSvc     *auth.LoginService
+	pjClient     *powerjob.Client // PowerJob 同步客户端(/apps/:appId/jobs/import-powerjob)
+	webFS        fs.FS
 }
 
 // buildRouter 装配全部 HTTP 路由:
@@ -259,11 +270,14 @@ func buildRouter(d routerDeps) *gin.Engine {
 	// /api:登录公开;me/logout 与资源路由各自前置 SessionAuth(在 own 内部按矩阵挂)。
 	api := r.Group("/api")
 	api.POST("/auth/login", own.LoginRateLimit(d.cfg.Auth.Login.MaxAttemptsPerMin), own.LoginHandler(d.loginSvc))
-	own.RegisterAuth(api, d.authStore)
+	own.RegisterAuth(api, own.Deps{Auth: d.authStore, AdminUsers: d.adminUserSvc})
 	own.Register(api, own.Deps{
 		Apps: d.appSvc, Jobs: d.jobSvc, Instances: d.insSvc,
-		Store: d.st, Auth: d.authStore, Reg: d.reg,
+		Store: d.st, Auth: d.authStore, Reg: d.reg, AdminUsers: d.adminUserSvc,
+		PowerJobClient: d.pjClient,
 	})
+	// /account/*:当前管理员自查/改用户名/改密码(仅管理员,挂 SessionAuth + RequireAdmin)。
+	own.RegisterAccount(api, own.Deps{Auth: d.authStore, AdminUsers: d.adminUserSvc})
 
 	// /worker:简化 http worker 协议(心跳/回报状态/回报日志),无鉴权。
 	worker.Register(r.Group("/worker"), worker.Deps{

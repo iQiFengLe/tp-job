@@ -4,9 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 
-	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 )
 
@@ -79,19 +77,12 @@ type PowerJob struct {
 	ServerAddress string `yaml:"server_address"` // /server/acquire 返回值;PowerJob worker 可达的 host:port
 }
 
-// Auth 管理端鉴权配置:管理员账户(配置注入,不入库)+ 登录会话参数。
+// Auth 管理端鉴权配置:登录会话参数 + 登录端点限流。管理员账户走 admin_user 表
+// (首次启动 seed admin/admin123,之后 Web 可改用户名/密码),不再经配置/环境变量注入。
 // 应用账户走 app 表(AppName + bcrypt Password)。worker 心跳不走登录(靠 appName + 网络隔离)。
 type Auth struct {
-	Admins  []AdminAccount `yaml:"admins"`  // 管理员账户(配置注入,不入库)
-	Session SessionConfig  `yaml:"session"` // 登录会话参数
-	Login   LoginConfig    `yaml:"login"`   // 登录端点限流(防爆破 + bcrypt DoS)
-}
-
-// AdminAccount 管理员账户。Password 为 bcrypt 哈希;env TASK_SCHEDULE_ADMIN_PASSWORD
-// 注入明文时由 applyEnv 哈希后落入 Admins[0]。
-type AdminAccount struct {
-	Username string `yaml:"username"`
-	Password string `yaml:"password"` // bcrypt 哈希
+	Session SessionConfig `yaml:"session"` // 登录会话参数
+	Login   LoginConfig   `yaml:"login"`   // 登录端点限流(防爆破 + bcrypt DoS)
 }
 
 // SessionConfig 登录会话参数。
@@ -104,12 +95,6 @@ type SessionConfig struct {
 type LoginConfig struct {
 	MaxAttemptsPerMin int `yaml:"max_attempts_per_min"` // 每 IP 每分钟最大尝试次数;0=不限(默认,向后兼容)
 }
-
-// 默认管理员占位凭据(开发便利):applyDefaults 在 Admins 为空时种入;release 防呆拒绝之。
-const (
-	defaultAdminUsername = "admin"
-	defaultAdminPassword = "change-me-admin"
-)
 
 // Load 从指定路径加载配置,path 为空时使用默认 config.yaml
 func Load(path string) (*Config, error) {
@@ -132,15 +117,7 @@ func Load(path string) (*Config, error) {
 // applyEnv 用环境变量覆盖配置(优先级高于配置文件),便于容器/CI 注入密钥与开关,
 // 避免把 mysql dsn / 管理员密码等明文写进 config.yaml。空值视为未设置,不覆盖。
 func (c *Config) applyEnv() {
-	// 管理员账户:env 注入明文用户名/密码,加载时哈希后落入 Admins[0](便于容器注入)。
-	if v := os.Getenv("TASK_SCHEDULE_ADMIN_USERNAME"); v != "" {
-		c.ensureAdminSlot()
-		c.Auth.Admins[0].Username = v
-	}
-	if v := os.Getenv("TASK_SCHEDULE_ADMIN_PASSWORD"); v != "" {
-		c.ensureAdminSlot()
-		c.Auth.Admins[0].Password = hashPassword(v)
-	}
+	// 管理员账户已迁移至 admin_user 表(首次启动 seed admin/admin123,Web 可改),不再支持 env 注入。
 	if v := os.Getenv("TASK_SCHEDULE_DB_DRIVER"); v != "" {
 		c.Database.Driver = v
 	}
@@ -217,74 +194,19 @@ func (c *Config) applyDefaults() {
 	if c.Worker.TimeoutSeconds == 0 {
 		c.Worker.TimeoutSeconds = 600
 	}
-	// 管理员账户为空时种默认占位(dev 便利);release 防呆由 Auth.Validate 拒绝。
-	if len(c.Auth.Admins) == 0 {
-		c.Auth.Admins = []AdminAccount{{
-			Username: defaultAdminUsername,
-			Password: hashPassword(defaultAdminPassword),
-		}}
-	}
 	if c.Auth.Session.TTLSeconds == 0 {
 		c.Auth.Session.TTLSeconds = 86400
 	}
 }
 
-// ensureAdminSlot 保证 Admins[0] 存在(供 env 注入 admin 用户名/密码时写入)。
-func (c *Config) ensureAdminSlot() {
-	if len(c.Auth.Admins) == 0 {
-		c.Auth.Admins = append(c.Auth.Admins, AdminAccount{})
-	}
-}
-
-// hashPassword bcrypt 哈希明文。生成失败(如超 72 字节)返回原值——由 Validate 在
-// release 模式兜底拒绝(非 bcrypt 格式校验失败),避免这里 panic。
-func hashPassword(plain string) string {
-	h, err := bcrypt.GenerateFromPassword([]byte(plain), bcrypt.DefaultCost)
-	if err != nil {
-		return plain
-	}
-	return string(h)
-}
-
-// isBcryptHash 判断是否为合法 bcrypt 哈希格式($2a/$2b/$2y$ 前缀,60 字符)。
-func isBcryptHash(s string) bool {
-	if len(s) != 60 {
-		return false
-	}
-	return strings.HasPrefix(s, "$2a$") || strings.HasPrefix(s, "$2b$") || strings.HasPrefix(s, "$2y$")
-}
-
-// Validate 校验管理员账户配置安全性。release=true 时严格(拒绝空/默认占位/格式非法/重名);
-// release=false 时仅做结构性兜底(返回 nil,问题由启动日志提示)。由装配层(main.go)在
+// Validate 登录安全校验。管理员账户已入库(首次 seed admin/admin123,无空账户/弱口令裸奔风险),
+// 故只校验登录端点限流:bcrypt 单次校验耗 CPU,无限流时登录端点可被当作资源放大型 DoS,亦可被
+// 密码爆破。release 模式强制要求显式配置(建议 10~20);debug 不校验。由装配层(main.go)在
 // Load 后按 Server.Mode 调用。
 func (a *Auth) Validate(release bool) error {
 	if !release {
 		return nil
 	}
-	if len(a.Admins) == 0 {
-		return errors.New("release 模式必须配置至少一个管理员账户(auth.admins 或 TASK_SCHEDULE_ADMIN_USERNAME/PASSWORD)")
-	}
-	seen := make(map[string]bool)
-	for _, ad := range a.Admins {
-		if strings.TrimSpace(ad.Username) == "" {
-			return errors.New("管理员账户 username 不能为空")
-		}
-		if ad.Password == "" {
-			return fmt.Errorf("管理员账户 %s 的 password 不能为空", ad.Username)
-		}
-		if !isBcryptHash(ad.Password) {
-			return fmt.Errorf("管理员账户 %s 的 password 非合法 bcrypt 哈希(60 字符,$2a/$2b/$2y$ 前缀)", ad.Username)
-		}
-		if bcrypt.CompareHashAndPassword([]byte(ad.Password), []byte(defaultAdminPassword)) == nil {
-			return fmt.Errorf("管理员账户 %s 使用了默认占位密码 %q,release 模式禁止(请通过环境变量 TASK_SCHEDULE_ADMIN_PASSWORD 注入强密码)", ad.Username, defaultAdminPassword)
-		}
-		if seen[ad.Username] {
-			return fmt.Errorf("管理员用户名重复: %s", ad.Username)
-		}
-		seen[ad.Username] = true
-	}
-	// 登录端点限流:bcrypt 单次校验耗 CPU,无限流时登录端点可被当作资源放大型 DoS,亦可被密码爆破。
-	// release 模式拒不开箱裸奔(同"拒默认密码"约定),强制运维显式配置(建议 10~20)。
 	if a.Login.MaxAttemptsPerMin <= 0 {
 		return errors.New("release 模式必须显式配置 auth.login.max_attempts_per_min(登录限流,防爆破+bcrypt DoS;建议 10~20)")
 	}

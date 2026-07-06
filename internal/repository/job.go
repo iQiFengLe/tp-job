@@ -84,3 +84,30 @@ func (s JobStore) ListByIDs(ids []int64) ([]domain.Job, error) {
 	err := s.db.Where("id IN ?", ids).Find(&jobs).Error
 	return jobs, err
 }
+
+// GetByFrom 按 (app_id, from_id, from_type) 查指定 app 内的来源 job(导入 upsert 判重用)。
+// 每个 app 独立判重:同源 job 可分存不同 app。返回 gorm.ErrRecordNotFound 表示该 app 尚未导入此来源。
+func (s JobStore) GetByFrom(appID int64, fromID, fromType string) (*domain.Job, error) {
+	var j domain.Job
+	if err := s.db.Where("app_id = ? AND from_id = ? AND from_type = ?", appID, fromID, fromType).First(&j).Error; err != nil {
+		return nil, err
+	}
+	return &j, nil
+}
+
+// ListByFrom 批量按 (app_id, from_type, from_id IN ...) 查现有来源 job(导入判重,消除逐条 GetByFrom 的 N+1)。
+// 返回 fromID → *Job map;调用方按 job.FromID 查是否冲突。空 fromIDs 直接返回空 map。
+func (s JobStore) ListByFrom(appID int64, fromType string, fromIDs []string) (map[string]*domain.Job, error) {
+	out := make(map[string]*domain.Job, len(fromIDs))
+	if len(fromIDs) == 0 {
+		return out, nil
+	}
+	var jobs []domain.Job
+	if err := s.db.Where("app_id = ? AND from_type = ? AND from_id IN ?", appID, fromType, fromIDs).Find(&jobs).Error; err != nil {
+		return nil, err
+	}
+	for i := range jobs {
+		out[jobs[i].FromID] = &jobs[i]
+	}
+	return out, nil
+}

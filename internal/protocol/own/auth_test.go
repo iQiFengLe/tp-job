@@ -9,31 +9,26 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"golang.org/x/crypto/bcrypt"
 
 	"task-schedule/internal/auth"
+	"task-schedule/internal/dservice"
 )
 
-// hashPwd 测试用 bcrypt 哈希(与 auth/login.go 的 admin 凭据格式一致)。
-func hashPwd(t *testing.T, pwd string) string {
-	t.Helper()
-	h, err := bcrypt.GenerateFromPassword([]byte(pwd), bcrypt.MinCost)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(h)
-}
+// hashPwd 已移除:admin 凭据改走真实 AdminUserService.SeedDefault(admin/admin123)。
 
-// newAuthDeps 在 newDeps 基础上注入鉴权:会话 store + LoginService(admin + app 表)。
+// newAuthDeps 在 newDeps 基础上注入鉴权:会话 store + LoginService(admin_user 表 + app 表)。
+// admin 走真实 AdminUserService.SeedDefault(种 admin/admin123),一并覆盖 seed→登录→账户管理链路。
 func newAuthDeps(t *testing.T) (Deps, *auth.Store, *auth.LoginService) {
 	t.Helper()
 	d, _ := newDeps(t)
 	store := auth.NewStore(time.Hour)
 	d.Auth = store
-	login := auth.NewLoginService(
-		[]auth.AdminCredential{{Username: "admin", PasswordHash: hashPwd(t, "admin-pw")}},
-		d.Apps, store,
-	)
+	adminSvc := dservice.NewAdminUserService(d.Store)
+	if err := adminSvc.SeedDefault(); err != nil {
+		t.Fatalf("seed admin: %v", err)
+	}
+	d.AdminUsers = adminSvc
+	login := auth.NewLoginService(adminSvc, d.Apps, store)
 	return d, store, login
 }
 
@@ -42,7 +37,7 @@ func buildAPI(d Deps, store *auth.Store, login *auth.LoginService) *gin.Engine {
 	g := gin.New()
 	api := g.Group("/api")
 	api.POST("/auth/login", LoginHandler(login))
-	RegisterAuth(api, store)
+	RegisterAuth(api, d)
 	Register(api, d)
 	return g
 }
@@ -101,7 +96,7 @@ func TestOwnAuthMatrix(t *testing.T) {
 	g := buildAPI(d, store, login)
 
 	// —— 管理员链路 ——
-	adminTok := loginAs(t, g, "admin", "admin-pw")
+	adminTok := loginAs(t, g, "admin", "admin123")
 
 	w := authReq(t, g, "GET", "/api/auth/me", nil, adminTok)
 	wantCode(t, "admin me", w, 200)

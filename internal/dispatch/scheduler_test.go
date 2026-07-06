@@ -80,7 +80,7 @@ func TestSchedulerDispatchesToWorker(t *testing.T) {
 	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
 	now := time.Now()
 	job := &domain.Job{AppID: 1, Name: "j", ExecuteType: "http", JobParams: "p1", Tag: "t1",
-		ScheduleKind: "cron", ScheduleExpr: "*/1 * * * *", NextRunTime: &now}
+		ScheduleKind: "cron", ScheduleExpr: "*/1 * * * *", NextRunTime: &now, Enabled: true}
 	if err := st.Job.Create(job); err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestSchedulerCronSerial(t *testing.T) {
 	past := now.Add(-time.Second)
 	// fix_rate 100ms:多处到期,但首个未释放 → 后续跳过(不推进游标);释放后继续派发
 	job := &domain.Job{AppID: 1, Name: "j", ExecuteType: "http", JobParams: "p",
-		ScheduleKind: "fix_rate", ScheduleExpr: "100", NextRunTime: &past}
+		ScheduleKind: "fix_rate", ScheduleExpr: "100", NextRunTime: &past, Enabled: true}
 	if err := st.Job.Create(job); err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func TestSchedulerNoWorkerFailsInstance(t *testing.T) {
 	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
 	now := time.Now()
 	job := &domain.Job{AppID: 1, Name: "j", ExecuteType: "http", JobParams: "p",
-		ScheduleKind: "cron", ScheduleExpr: "*/1 * * * *", NextRunTime: &now}
+		ScheduleKind: "cron", ScheduleExpr: "*/1 * * * *", NextRunTime: &now, Enabled: true}
 	_ = st.Job.Create(job)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -465,7 +465,7 @@ func TestSchedulerWindowStartFuture(t *testing.T) {
 	now := time.Now()
 	start := now.Add(time.Hour) // 窗口 1h 后才开始
 	job := &domain.Job{AppID: 1, Name: "j", ExecuteType: "http",
-		ScheduleKind: "cron", ScheduleExpr: "*/1 * * * *", NextRunTime: &now, StartTime: &start}
+		ScheduleKind: "cron", ScheduleExpr: "*/1 * * * *", NextRunTime: &now, StartTime: &start, Enabled: true}
 	if err := st.Job.Create(job); err != nil {
 		t.Fatal(err)
 	}
@@ -495,7 +495,7 @@ func TestSchedulerWindowEndPast(t *testing.T) {
 	now := time.Now()
 	past := now.Add(-time.Hour) // 窗口 1h 前已结束
 	job := &domain.Job{AppID: 1, Name: "j", ExecuteType: "http",
-		ScheduleKind: "cron", ScheduleExpr: "*/1 * * * *", NextRunTime: &now, EndTime: &past}
+		ScheduleKind: "cron", ScheduleExpr: "*/1 * * * *", NextRunTime: &now, EndTime: &past, Enabled: true}
 	if err := st.Job.Create(job); err != nil {
 		t.Fatal(err)
 	}

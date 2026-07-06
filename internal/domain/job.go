@@ -8,7 +8,7 @@ import "time"
 // 调度按 ScheduleKind(cron/fix_rate/fix_delay/delay/run_at/api)+ ScheduleExpr 推算 NextRunTime。
 type Job struct {
 	ID    int64  `gorm:"primaryKey;autoIncrement" json:"id"`
-	AppID int64  `gorm:"index:idx_app_job;not null" json:"app_id"` // int 外键
+	AppID int64  `gorm:"index:idx_app_job;uniqueIndex:idx_job_from,priority:1;not null" json:"app_id"` // int 外键
 	Name  string `gorm:"type:varchar(128);not null" json:"name"`
 
 	// —— 执行(当前唯一 http 派发;字段保留供未来扩展)——
@@ -35,7 +35,13 @@ type Job struct {
 	RetryCount       int  `gorm:"default:0" json:"retry_count,omitempty"`
 	RetryIntervalSec int  `gorm:"default:0" json:"retry_interval_sec,omitempty"`
 	DefaultPriority  int  `gorm:"default:0" json:"default_priority,omitempty"`
-	Enabled          bool `gorm:"default:true" json:"enabled"`
+	Enabled          bool `json:"enabled"` // 无 DB default:Create 由 Go 侧显式赋值,RETURNING 回写一致(避 gorm 零值覆盖)
+
+	// 来源标识:复合唯一键 (app_id, from_id, from_type)——每 app 独立(同源 job 可分存多 app)。
+	// 自建 job = uuid + "SELF";PowerJob 同步 = "pj:<server指纹>:<原jobID>" + "powerjob"(含来源 server 命名空间,
+	// 跨 PowerJob server 同 ID job 不互相覆盖)。用于幂等同步 upsert 判重与来源展示。
+	FromID   string `gorm:"type:varchar(64);not null;uniqueIndex:idx_job_from,priority:2" json:"from_id,omitempty"`
+	FromType string `gorm:"type:varchar(32);not null;uniqueIndex:idx_job_from,priority:3;default:SELF" json:"from_type,omitempty"`
 
 	CreatedAt time.Time `gorm:"autoCreateTime" json:"created_at"`
 	UpdatedAt time.Time `gorm:"autoUpdateTime" json:"updated_at"` // 最后更新时间

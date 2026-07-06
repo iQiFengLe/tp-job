@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 
 	"task-schedule/internal/dispatch"
@@ -35,6 +36,13 @@ func computeNextRun(job *domain.Job) (*time.Time, error) {
 
 // Create 校验 + 推算 NextRunTime + 落库。
 func (s *JobService) Create(job *domain.Job) error {
+	// 来源标识:未带来源的视为本系统自建(填 uuid + SELF)。同步导入的 job 已预设 from,不覆盖。
+	if job.FromID == "" {
+		job.FromID = uuid.New().String()
+	}
+	if job.FromType == "" {
+		job.FromType = "SELF"
+	}
 	if err := validateJob(job); err != nil {
 		return fmt.Errorf("%w: %v", ErrJobValidate, err)
 	}
@@ -43,6 +51,8 @@ func (s *JobService) Create(job *domain.Job) error {
 		return fmt.Errorf("%w: %v", ErrJobValidate, err)
 	}
 	job.NextRunTime = next
+	// Enabled 无 DB default(见 domain.Job tag):Create 直接写入 Go 侧真实值,RETURNING 回写一致,
+	// 不再需要"Create 后补 Update 修正零值覆盖"的补丁。
 	return s.st.Job.Create(job)
 }
 

@@ -37,6 +37,22 @@ export interface MeResp {
   app_name?: string;
 }
 
+// ===== 账户(管理员自助改名/改密) =====
+
+export interface AccountProfile {
+  id: number;
+  username: string;
+}
+
+export interface AccountUpdateProfileReq {
+  username: string;
+}
+
+export interface AccountChangePasswordReq {
+  old_password: string;
+  new_password: string;
+}
+
 // ===== App =====
 
 export interface AppView {
@@ -83,8 +99,37 @@ export interface JobView {
   default_priority?: number;
   callback_url?: string;
   enabled: boolean;
+  from_id?: string;
+  from_type?: string;
   created_at: string;
   updated_at: string;
+}
+
+// ===== PowerJob 同步导入 =====
+
+export interface ImportPowerJobReq {
+  server_address: string;
+  app_name: string;
+  password?: string;
+  token?: string;
+  dry_run: boolean;
+}
+
+export interface ImportPowerJobItem {
+  name: string;
+  schedule_kind: string;
+  schedule_expr: string;
+  enabled: boolean;
+  conflict: boolean; // true=当前 app 已有同源 job(将更新)
+  error?: string;
+}
+
+export interface ImportPowerJobResp {
+  fetched: number;
+  imported: number; // dry_run 时为"将新增"
+  updated: number; // dry_run 时为"将更新"
+  skipped: number;
+  preview: ImportPowerJobItem[];
 }
 
 export interface JobCreateValues {

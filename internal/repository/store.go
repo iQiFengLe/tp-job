@@ -20,11 +20,12 @@ type Store struct {
 	Job      JobStore
 	Instance InstanceStore
 	Callback CallbackStore
+	AdminUser AdminUserStore
 }
 
 // FromDB 基于已打开的 gorm.DB 构建仓储,并 AutoMigrate domain 表(app/job/job_instance)。
 func FromDB(db *gorm.DB) (*Store, error) {
-	if err := db.AutoMigrate(&domain.App{}, &domain.Job{}, &domain.Instance{}, &domain.Callback{}); err != nil {
+	if err := db.AutoMigrate(&domain.App{}, &domain.Job{}, &domain.Instance{}, &domain.Callback{}, &domain.AdminUser{}); err != nil {
 		return nil, fmt.Errorf("domain auto migrate: %w", err)
 	}
 	s := &Store{DB: db}
@@ -32,5 +33,6 @@ func FromDB(db *gorm.DB) (*Store, error) {
 	s.Job = JobStore{db: db}
 	s.Instance = InstanceStore{db: db}
 	s.Callback = CallbackStore{db: db}
+	s.AdminUser = AdminUserStore{db: db}
 	return s, nil
 }
