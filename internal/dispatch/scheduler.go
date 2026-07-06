@@ -99,13 +99,24 @@ func (s *Scheduler) stopTimers() {
 	s.timerMu.Unlock()
 }
 
-// goTrack 启动一个受 wg 跟踪的 goroutine,供优雅关闭统一等待(含派发子协程 execute/runManualHeld)。
+// goTrack 启动一个受 wg 跟踪的 goroutine,供优雅关闭统一等待(含派发子协程 execute/runManualHeld/retry)。
 func (s *Scheduler) goTrack(fn func()) {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		fn()
 	}()
+}
+
+// cbBuild 返回构造回调的闭包(供 *WithCallback 在 tx 内用最新行构造 payload);回调未启用时返回 nil,
+// 使仓储走无回调快捷路径(免事务开销)。job 可能为 nil(reaper 兜底分支),Build 对 nil job 返回 nil。
+func (s *Scheduler) cbBuild(job *domain.Job, eventStatus string) func(*domain.Instance) *domain.Callback {
+	if s.cbBuilder == nil || !s.cbBuilder.Enabled() {
+		return nil
+	}
+	return func(latest *domain.Instance) *domain.Callback {
+		return s.cbBuilder.Build(latest, job, eventStatus)
+	}
 }
 
 // Run 定时调度循环,直到 ctx 取消。
@@ -214,9 +225,7 @@ func (s *Scheduler) execute(ctx context.Context, job *domain.Job, oldNext time.T
 		Tag:               job.Tag,
 		JobInstanceParams: job.JobParams, // 定时触发:实例参数默认=任务参数
 	}
-	if err := s.store.Instance.CreateWithCallback(ins, func() *domain.Callback {
-		return s.cbBuilder.Build(ins, job, domain.StatusQueued)
-	}); err != nil {
+	if err := s.store.Instance.CreateWithCallback(ins, s.cbBuild(job, domain.StatusQueued)); err != nil {
 		s.log.Error("创建实例失败", "job_id", job.ID, "err", err)
 		s.releaseByJob(job.ID)
 		return
@@ -280,9 +289,7 @@ func (s *Scheduler) SubmitManualDelayed(job *domain.Job, priority int, instanceP
 		Tag:               job.Tag,
 		JobInstanceParams: instanceParams,
 	}
-	if err := s.store.Instance.CreateWithCallback(ins, func() *domain.Callback {
-		return s.cbBuilder.Build(ins, job, domain.StatusQueued)
-	}); err != nil {
+	if err := s.store.Instance.CreateWithCallback(ins, s.cbBuild(job, domain.StatusQueued)); err != nil {
 		return 0, fmt.Errorf("创建 queued 实例失败: %w", err)
 	}
 	s.appendLog(job, ins, "CREATE", "info", "手动触发排队")
@@ -437,18 +444,23 @@ func (s *Scheduler) RecoverQueued() error {
 // 由 RetryPump 接管重派(重启不丢);无余力则定格终态 failed。取代旧的 bulk MarkStaleActiveAsFailed:
 // 旧版只标 failed 不衔接重试,导致配了 RetryCount 的 job 在重启窗口内的在飞实例被静默放弃。
 // at-least-once:重派可能与原 worker 的迟到回报并存,业务需幂等。应在 main 启动、RecoverQueued 之前调用。
-func (s *Scheduler) RecoverStaleActive() error {
-	list, err := s.store.Instance.ListGeneralizedActive(s.limit)
+func (s *Scheduler) RecoverStaleActive(grace time.Duration) error {
+	// 仅清理"重启前已超 grace"的活跃实例(大概率真失联);近期实例交 reaper 按真实失联(心跳/TimeoutSec)
+	// 判定——避免重启即批量失败转移仍在正常执行的长任务(worker 迟到 success 被终态守护拒绝 → 重复执行)。
+	// grace<=0(配置漏填)用默认 10min,不退回"不限全清"——避免误配静默回退到本次修复要消灭的旧 bug。
+	if grace <= 0 {
+		grace = 10 * time.Minute
+	}
+	olderThan := time.Now().Add(-grace)
+	list, err := s.store.Instance.ListGeneralizedActive(olderThan, s.limit)
 	if err != nil {
 		return err
 	}
 	jobs := s.loadJobs(list) // 批量预加载,消除 scheduleRetry 的逐实例 Job.Get
 	for i := range list {
 		ins := list[i]
-		ins.Status = domain.StatusFailed
-		ins.Result = "服务重启前未完成"
 		job := jobs[ins.JobID]
-		rows, err := s.store.Instance.UpdateResultWithCallback(ins.ID, domain.StatusFailed, "服务重启前未完成", s.cbBuilder.Build(&ins, job, domain.StatusFailed))
+		rows, err := s.store.Instance.UpdateResultWithCallback(ins.ID, domain.StatusFailed, "服务重启前未完成", s.cbBuild(job, domain.StatusFailed))
 		if err != nil {
 			s.log.Error("重启清理实例失败", "instance_id", ins.ID, "err", err)
 			continue
@@ -460,7 +472,7 @@ func (s *Scheduler) RecoverStaleActive() error {
 		s.scheduleRetry(&ins, job)
 	}
 	if n := len(list); n > 0 {
-		s.log.Info("已清理重启前未终结的实例(有重试余力的将由 RetryPump 重派)", "count", n)
+		s.log.Info("已清理重启前超 grace 的未终结实例(近期实例交 reaper 判定;有余力者由 RetryPump 重派)", "count", n, "grace", grace)
 	}
 	return nil
 }
@@ -578,7 +590,7 @@ func (s *Scheduler) loadJobs(list []domain.Instance) map[int64]*domain.Job {
 
 func (s *Scheduler) reapOnce(reg *workerreg.Registry) {
 	// 1. 扫描 waiting_receive/running 卡死实例
-	list, err := s.store.Instance.ListGeneralizedActive(s.limit)
+	list, err := s.store.Instance.ListGeneralizedActive(time.Time{}, s.limit)
 	if err != nil {
 		s.log.Error("reaper 扫描失败", "err", err)
 		return
@@ -622,10 +634,9 @@ func (s *Scheduler) reapOnce(reg *workerreg.Registry) {
 // finalizeReaped 标记实例 failed + 释放槽 + 调度重试(设 next_retry_time)。
 // job 透传给 scheduleRetry(reaper 路径已 loadJobs,避免重复 Job.Get);nil 时 scheduleRetry 自查。
 func (s *Scheduler) finalizeReaped(ins *domain.Instance, reason string, job *domain.Job) {
-	ins.Status = domain.StatusFailed
-	ins.Result = reason                                    // payload 快照
-	cb := s.cbBuilder.Build(ins, job, domain.StatusFailed) // job 可能为 nil(reaper 兜底分支),Build 返回 nil
-	rows, err := s.store.Instance.UpdateResultWithCallback(ins.ID, domain.StatusFailed, reason, cb)
+	// payload 用 tx 内 latest 行(含本次写入的 failed/result),无需预先内存赋值;job 可能为 nil,
+	// cbBuild→Build 对 nil job 返回 nil(不插回调)。
+	rows, err := s.store.Instance.UpdateResultWithCallback(ins.ID, domain.StatusFailed, reason, s.cbBuild(job, domain.StatusFailed))
 	if err != nil {
 		s.log.Error("reaper 标记失败", "instance_id", ins.ID, "err", err)
 		return
@@ -643,7 +654,8 @@ func (s *Scheduler) finalizeReaped(ins *domain.Instance, reason string, job *dom
 // 兜底优先级:worker 未绑定 → worker 失联 → 执行超时。执行超时仅在 job.TimeoutSec>0 时生效:
 // TimeoutSec=0 表示"不限执行时长"(长任务语义),此时若 worker 持续心跳(在线)却永不推进,
 // 实例会停在 waiting_receive/running 不被回收——故生产强烈建议为 job 配置合理的 TimeoutSec,
-// 否则唯一能兜底的只有 worker 心跳真的停掉(失联判定)。
+// 否则唯一能兜底的只有 worker 心跳真的停掉(失联判定)或服务重启(start_time 超 grace 后
+// RecoverStaleActive 清理)。grace 内的这类卡死实例会滞留到 start_time 超 grace 的下次重启。
 func (s *Scheduler) stallReason(ins *domain.Instance, job *domain.Job, reg *workerreg.Registry, now time.Time) string {
 	if ins.WorkerAddress == "" {
 		// 选后即绑后,正常派发不会出现「已派发态却无 worker 绑定」:MarkDispatched 先写 worker_address
@@ -708,6 +720,15 @@ func (s *Scheduler) retryOnce(ctx context.Context) {
 
 // retryInstance 按 ins.RetryIndex+1 创建重试实例并派发;复用原实例的 root(链首)。
 func (s *Scheduler) retryInstance(ctx context.Context, job *domain.Job, orig *domain.Instance) {
+	// 去重:已存在同 root 且 RetryIndex+1 的重试实例时跳过——OpenAPI Retry(设 next_retry_time)与
+	// RetryPump(创建实例)并发触发同一 orig 会产生两个相同 RetryIndex 的重试实例,破坏重试链语义。
+	// 查询失败按"不存在"继续(最坏重复创建,at-least-once 允许)。
+	if exists, err := s.store.Instance.ExistsRetryChild(domain.RootOf(orig), int64(orig.RetryIndex+1)); err != nil {
+		s.log.Error("检查重试实例存在性失败", "orig", orig.ID, "err", err)
+	} else if exists {
+		s.log.Info("已存在同 RetryIndex 重试实例,跳过重复创建", "orig", orig.ID, "retry_index", orig.RetryIndex+1)
+		return
+	}
 	if !s.tryAcquire(job.ID, job.MaxConcurrency) {
 		// 槽满:短延后再设 next_retry_time,RetryPump 下轮重试(不丢)
 		_ = s.store.Instance.SetNextRetryTime(orig.ID, time.Now().Add(time.Second))
@@ -725,9 +746,7 @@ func (s *Scheduler) retryInstance(ctx context.Context, job *domain.Job, orig *do
 		Tag:               orig.Tag,
 		JobInstanceParams: orig.JobInstanceParams,
 	}
-	if err := s.store.Instance.CreateWithCallback(retryIns, func() *domain.Callback {
-		return s.cbBuilder.Build(retryIns, job, domain.StatusQueued)
-	}); err != nil {
+	if err := s.store.Instance.CreateWithCallback(retryIns, s.cbBuild(job, domain.StatusQueued)); err != nil {
 		s.log.Error("创建重试实例失败", "orig", orig.ID, "err", err)
 		s.releaseByJob(job.ID)
 		return
@@ -735,10 +754,17 @@ func (s *Scheduler) retryInstance(ctx context.Context, job *domain.Job, orig *do
 	s.appendLogRaw(retryIns, "RETRY", "info",
 		"重试派发 retry_index="+strconv.Itoa(retryIns.RetryIndex)+" (from "+strconv.FormatInt(orig.ID, 10)+")")
 	s.bindHeld(retryIns.ID, job.ID)
-	// 选后即绑派发(同 execute,详见 dispatchToWorker)。
-	if s.dispatchToWorker(ctx, job, retryIns, "重试派发") {
-		return
-	}
+	// 异步派发(同 execute/manual):慢/挂起 worker 不阻塞 retryOnce 单轮;关闭期纳入 wg 跟踪。
+	// panic 时释放该实例绑定的槽(同 execute 兜底)。
+	s.goTrack(func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.log.Error("重试派发 panic", "orig", orig.ID, "panic", r)
+				s.releaseByInstance(retryIns.ID)
+			}
+		}()
+		s.dispatchToWorker(ctx, job, retryIns, "重试派发")
+	})
 }
 
 // scheduleRetry failed 实例若仍有重试余力,设 next_retry_time 由 RetryPump 重派。
@@ -774,8 +800,8 @@ func (s *Scheduler) dispatchToWorker(ctx context.Context, job *domain.Job, ins *
 		s.failDispatch(ins, job, prefix, "无可用 worker(tag 不匹配或全部离线)")
 		return true
 	}
-	ins.WorkerAddress = addr // payload 快照用(DB 由 MarkDispatched 写)
-	rows, err := s.store.Instance.MarkDispatchedWithCallback(ins.ID, addr, s.cbBuilder.Build(ins, job, domain.StatusWaitingReceive))
+	// payload 用 tx 内 latest 行(MarkDispatched 已写 worker_address),无需预先内存赋值。
+	rows, err := s.store.Instance.MarkDispatchedWithCallback(ins.ID, addr, s.cbBuild(job, domain.StatusWaitingReceive))
 	if err != nil {
 		s.log.Error("标记派发失败", "instance_id", ins.ID, "err", err)
 		s.failDispatch(ins, job, prefix, "绑定 worker 失败: "+err.Error())
@@ -800,17 +826,20 @@ func (s *Scheduler) dispatchToWorker(ctx context.Context, job *domain.Job, ins *
 
 // failDispatch 派发失败统一善后:标记 failed(清 worker 绑定)+ 记 STATUS 日志 + 释放槽 + 衔接重试。
 func (s *Scheduler) failDispatch(ins *domain.Instance, job *domain.Job, prefix, reason string) {
-	ins.Status = domain.StatusFailed
-	ins.Result = reason // payload 快照
 	// 选后即绑下 Send 失败时 worker_address 已先于 POST commit;派发失败该绑定无意义,
 	// 用 FailDispatchWithCallback 在同事务清 worker_address/start_time + 置 failed,避免
 	// "failed 实例仍指向某 worker"的展示残留(与 worker 回报 failed 保留 worker 供审计区分)。
-	if _, err := s.store.Instance.FailDispatchWithCallback(ins.ID, reason, s.cbBuilder.Build(ins, job, domain.StatusFailed)); err != nil {
+	rows, err := s.store.Instance.FailDispatchWithCallback(ins.ID, reason, s.cbBuild(job, domain.StatusFailed))
+	if err != nil {
 		s.log.Error("标记派发失败失败", "instance_id", ins.ID, "err", err)
 	}
 	s.appendLogRaw(ins, "STATUS", "error", prefix+"失败→failed: "+reason)
 	s.releaseByInstance(ins.ID)
-	s.scheduleRetry(ins, job)
+	// 仅本次真把实例置 failed(rows>0)时才衔接重试。rows==0 说明守护生效——实例已被并发置终态
+	// (如 worker 在 Send 失败前已回报 success),不应给一个已终态实例排重试(留脏 next_retry_time)。
+	if rows > 0 {
+		s.scheduleRetry(ins, job)
+	}
 }
 
 // ===== helpers =====

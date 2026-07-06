@@ -156,11 +156,24 @@ func (d Deps) updateApp(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "参数错误: "+err.Error())
 		return
 	}
-	if err := d.Apps.Update(paramInt64(c, "appId"), req.AppName, req.Password, req.Status); err != nil {
+	appID := paramInt64(c, "appId")
+	// app 角色改密码须验旧密码(对齐管理员 changePassword,防 token 泄露后被重置长期持有);
+	// admin 改任意 app 不校验(特权)。仅当本次要改密码(req.Password 非空)时校验。
+	if sess, ok := auth.SessionFrom(c); ok && !sess.IsAdmin() && req.Password != nil && *req.Password != "" {
+		old := ""
+		if req.OldPassword != nil {
+			old = *req.OldPassword
+		}
+		if err := d.Apps.VerifyOldPassword(appID, old); err != nil {
+			fail(c, http.StatusBadRequest, "旧密码校验失败")
+			return
+		}
+	}
+	if err := d.Apps.Update(appID, req.AppName, req.Password, req.Status); err != nil {
 		fail(c, badStatus(err), err.Error())
 		return
 	}
-	ok(c, gin.H{"id": paramInt64(c, "appId")})
+	ok(c, gin.H{"id": appID})
 }
 
 func (d Deps) deleteApp(c *gin.Context) {

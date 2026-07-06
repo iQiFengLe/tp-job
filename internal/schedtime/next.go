@@ -70,14 +70,24 @@ func NextByKind(kind, expr string, from time.Time) (*time.Time, error) {
 		if err != nil || ms <= 0 {
 			return nil, fmt.Errorf("%s 表达式必须是正整数毫秒", kind)
 		}
-		n := from.Add(time.Duration(ms) * time.Millisecond)
+		d := time.Duration(ms) * time.Millisecond
+		// 防溢出:ms 极大时 Duration(ms)*Millisecond 可能溢出 int64 变负 → next 变过去时间 → 每 tick 触发的暴走 job。
+		// 上限 1 年,杜绝极端配置。
+		if d <= 0 || d > 365*24*time.Hour {
+			return nil, fmt.Errorf("%s 表达式超出合理范围(0~1年)", kind)
+		}
+		n := from.Add(d)
 		return &n, nil
 	case "delay":
 		sec, err := strconv.Atoi(expr)
 		if err != nil || sec <= 0 {
 			return nil, fmt.Errorf("delay 表达式必须是正整数秒")
 		}
-		n := from.Add(time.Duration(sec) * time.Second)
+		d := time.Duration(sec) * time.Second
+		if d <= 0 || d > 365*24*time.Hour {
+			return nil, fmt.Errorf("delay 表达式超出合理范围(0~1年)")
+		}
+		n := from.Add(d)
 		return &n, nil
 	case "api", "run_at", "":
 		return nil, nil

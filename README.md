@@ -6,10 +6,10 @@
 可一行切 MySQL。前端管理台 `//go:embed` 编译进单二进制。
 
 - **统一执行模型**:服务端选 worker 异步派发,worker 回报。砍掉用户自定义 webhook URL/headers/body。
-- **两种 worker 接入**:`/worker/*`(通用 http,固定 body)/`/server/*`(标准 PowerJob Java worker 不改源码)。
+- **两种 worker 接入**:`/worker/*`(通用 http,固定 body)/`/server/*`(遵循 PowerJob 协议的自研 http worker)。不支持官方 Java processor,无任何 SDK。
 - **8 态状态机** + **DB 驱动重试**(重启不丢)+ **reaper 失败转移**(worker 失联/超时)。
 - **实例日志落本地文件**,按 root 实例聚合,呈现一次触发的完整时间线(调度埋点 + worker 上报)。
-- **管理端账户登录**(管理员配置注入 + 应用账户走 app 表)+ 权限矩阵(admin/app 双角色)。
+- **管理端账户登录**(管理员 admin_user 表 + 应用账户走 app 表)+ 权限矩阵(admin/app 双角色)。
 - int 自增主键 + AppName 全局唯一;PowerJob 兼容(`/server/*` + runJob)与新模型统一收敛。
 
 > 设计全貌见 [`docs/refactor-unified-model.md`](docs/refactor-unified-model.md)。
@@ -115,9 +115,7 @@ payload 为事件瞬间快照。投递语义为**至少一次**(at-least-once):
 
 ## 鉴权
 
-**管理员账户**(配置注入,不入库):`config.yaml` 的 `auth.admins` 或环境变量
-`TASK_SCHEDULE_ADMIN_USERNAME` / `TASK_SCHEDULE_ADMIN_PASSWORD`(明文,加载时 bcrypt)。
-debug 模式 `admins` 为空则自动种占位 `admin / change-me-admin`;**release 模式拒绝默认占位启动**。
+**管理员账户**(admin_user 表):首次启动自动 seed `admin / admin123`,登录后立即在 Web 顶部「账户设置」改用户名/密码。**不走 config.yaml、不支持环境变量注入**(旧版 env 注入已移除——`TASK_SCHEDULE_ADMIN_USERNAME/PASSWORD` 会被静默忽略,勿用)。release 模式由 `config.release.yaml` 的 `server.mode=release` + `auth.login.max_attempts_per_min` 控制(不再经 env 覆盖 mode)。
 
 **应用账户**:app 表(AppName + bcrypt Password),worker 心跳不校验密码(靠 appName + 网络隔离)。
 
@@ -138,8 +136,9 @@ debug 模式 `admins` 为空则自动种占位 `admin / change-me-admin`;**relea
 - `/worker/*` **简化 http 协议**:心跳 `POST /worker/heartbeat`;派发 `POST /run`
   body `{jobParams, jobInstanceParams, jobId, jobInstanceId}`;回报 `POST /worker/instances/:iid/status`
   `{status, result}`、`POST /worker/instances/:iid/logs` `{level, message, time}`。状态用领域 string。
-- `/server/*` **PowerJob 协议**:标准 PowerJob Java worker 不改源码接入(assert/acquire/workerHeartbeat/
-  reportInstanceStatus/reportLog),派发用官方 `runJob`(`ServerScheduleJobReq`),状态用官方数字码。
+- `/server/*` **PowerJob 协议**:遵循 PowerJob 协议的自研 http worker 接入(assert/acquire/workerHeartbeat/
+  reportInstanceStatus/reportLog),派发用 `runJob`(`ServerScheduleJobReq` 子集),状态用官方数字码。
+  不支持官方 Java processor(无 processorInfo 派发),不提供任何语言 SDK。
 
 **选址**:`jobInstanceTag = instance.tag || job.tag`;候选 = `online(appName) ∧ matchTag`;`matchTag` =
 `acceptNotTagJob || tag ∈ worker.tags || (tag 空 ∧ worker.tags 空)`;按 `systemMetrics.score` 降序取首。
@@ -159,11 +158,12 @@ debug 模式 `admins` 为空则自动种占位 `admin / change-me-admin`;**relea
 
 | 环境变量 | 作用 |
 |---|---|
-| `TASK_SCHEDULE_ADMIN_USERNAME` / `TASK_SCHEDULE_ADMIN_PASSWORD` | 管理员账户(明文密码加载时 bcrypt) |
 | `TASK_SCHEDULE_DB_DRIVER` | `sqlite` / `mysql` |
 | `TASK_SCHEDULE_MYSQL_DSN` | mysql DSN |
-| `TASK_SCHEDULE_SERVER_MODE` | `debug` / `release` / `test` |
 | `TASK_SCHEDULE_POWERJOB_SERVER_ADDRESS` | `/server/acquire` 返回值(PowerJob worker 可达地址) |
+
+> `server.mode` 不支持 env 覆盖(防降级绕过 release 限流强制),仅由 config.yaml 决定;部署需 release 用 `config.release.yaml`。
+> 管理员账户走 admin_user 表(首次启动 seed admin/admin123),不支持 env 注入。
 
 实例日志落 `{log.dir}/instances/{appID}/{instanceID}_{rootInstanceID}.log`;`log.instance_retention_days`
 按 mtime 清理(0=不清理)。

@@ -21,9 +21,10 @@ type CreateAppReq struct {
 }
 
 type UpdateAppReq struct {
-	AppName  *string `json:"app_name"`
-	Password *string `json:"password"`
-	Status   *int8   `json:"status"`
+	AppName     *string `json:"app_name"`
+	Password    *string `json:"password"`
+	OldPassword *string `json:"old_password"` // app 角色改密码时必填(验明正身);admin 改任意 app 不校验
+	Status      *int8   `json:"status"`
 }
 
 type AppView struct {

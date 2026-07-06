@@ -23,9 +23,9 @@ const (
 	pathPowerJobRunJob = "/worker/runJob"
 )
 
-// PowerJobRunReq 是 PowerJob 协议 runJob 请求体的最小形状。
-// 阶段 3 的 protocol/powerjob 会提供完整 wire DTO + translator;此处只内联必要字段,
-// 避免 dispatch 反向依赖尚未落地的协议包。字段对齐官方 ServerScheduleJobReq。
+// PowerJobRunReq 是 PowerJob 协议 runJob 请求体的最小形状(派发面向自研 http worker,仅必要字段)。
+// 不含 processorInfo/processorType/timeParams:本服务不支持官方 Java processor(无 SDK),
+// /server/* 仅供遵循 PowerJob 协议的自研 worker / 业务系统接入。字段对齐官方 ServerScheduleJobReq 子集。
 type PowerJobRunReq struct {
 	AllWorkerAddress []string `json:"allWorkerAddress"`
 	JobID            int64    `json:"jobId"`

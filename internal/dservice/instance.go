@@ -46,9 +46,12 @@ func (s *InstanceService) ReportStatus(id int64, status, result string) error {
 	return nil
 }
 
-// statusCallback 构造状态变更回调快照。回调未启用(cbBuilder nil 或 Enabled=false)时返回 nil,
-// 不查 ins/job(零开销);启用时 Get ins+job,把新 status/result 写入 ins 内存供 payload 快照。
-func (s *InstanceService) statusCallback(id int64, status, result string) *domain.Callback {
+// statusCallback 返回构造状态变更回调的闭包(供 *WithCallback tx 内用最新行构造 payload)。
+// 回调未启用时返回 nil(仓储走无回调快捷路径)。启用时:先 Get ins 做终态短路(已终态则不构造——
+// UpdateResultWithCallback 终态守护会让 rows==0,无需查 job+构造,高频心跳/终态重放场景省开销),
+// 闭包内用 tx 给的 latest 行 + 预查 job 构造 payload(eventStatus 是本次值,其余字段取 latest
+// 事件瞬间 DB 真实值,避免读快照 stale)。
+func (s *InstanceService) statusCallback(id int64, status, result string) func(*domain.Instance) *domain.Callback {
 	if s.cbBuilder == nil || !s.cbBuilder.Enabled() {
 		return nil
 	}
@@ -56,15 +59,16 @@ func (s *InstanceService) statusCallback(id int64, status, result string) *domai
 	if err != nil {
 		return nil
 	}
-	// 终态短路:实例已终态时,UpdateResultWithCallback 的终态守护会让本次上报 rows==0(callback 不入库),
-	// 无需再 Get job + 构造——高频心跳/终态重放场景省一次 Job.Get + Build。
+	// 终态短路:守护会让 rows==0,无需构造(高频心跳/终态重放场景省 Job.Get + Build)。
 	if domain.StatusTerminal(ins.Status) {
 		return nil
 	}
-	ins.Status = status
-	ins.Result = result
-	job, _ := s.st.Job.Get(ins.AppID, ins.JobID)
-	return s.cbBuilder.Build(ins, job, status)
+	// job 查询延迟到闭包内:用 tx 内 latest 的 AppID/JobID 现查,窗口最小化(消除 job 读快照 TOCTOU),
+	// 且仅在真事件(*WithCallback rows>0 调 build)时才查(省 rows==0 时的 Job.Get)。
+	return func(latest *domain.Instance) *domain.Callback {
+		job, _ := s.st.Job.Get(latest.AppID, latest.JobID)
+		return s.cbBuilder.Build(latest, job, status)
+	}
 }
 
 // SetStatus 管理员强制写入状态(纠错:可复活或改终态),不守护、不释放槽。

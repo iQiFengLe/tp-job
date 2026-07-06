@@ -1,8 +1,9 @@
-// Package powerjob 是 PowerJob Server 协议兼容层(/server/*)。
+// Package powerjob 是 PowerJob 协议兼容层(/server/* + /openApi/*)。
 //
-// 让标准 PowerJob Java worker(不改源码)接入:assert/acquire/workerHeartbeat/
-// reportInstanceStatus/reportLog/queryJobCluster。wire 格式对齐 PowerJob(base64 AskResponse、
-// 官方数字状态码),内部翻译为 domain。无鉴权(对齐 PowerJob Server,靠 /server/* 网络隔离)。
+// 让遵循 PowerJob 协议的自研 http worker / 业务系统接入(心跳/状态/日志上报 + OpenAPI),
+// wire 格式对齐 PowerJob(base64 AskResponse、官方数字状态码),内部翻译为 domain。
+// 注意:不支持官方 Java processor(无 SDK);派发面向自研 http worker。无鉴权(对齐 PowerJob Server,
+// 靠 /server/* /openApi/* 网络隔离)。
 package powerjob
 
 import "task-schedule/internal/domain"
@@ -63,6 +64,8 @@ func DomainToWire(s string) int {
 	case domain.StatusStopped:
 		return WireStopped
 	}
+	// 未知态(DB 脏数据/未来新增状态)返回 failed(确定终态),让客户端 fail-fast 停止轮询+告警;
+	// running 会让客户端认为活跃而死等(unknown 本不该发生,failed 更可观测)。
 	return WireFailed
 }
 

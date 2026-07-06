@@ -70,9 +70,9 @@ type Worker struct {
 	AllowedCIDRs   []string `yaml:"allowed_cidrs"`   // 可选:worker 地址白名单(CIDR 或单 IP),空=不限制(SSRF 纵深防御)
 }
 
-// PowerJob 兼容协议配置。/server/* 端点始终挂载(标准 PowerJob Java worker 不改源码接入);
-// 这里只保留 worker 可达地址。无独立调度循环——所有 job(含派发到 powerjob worker 的)统一由
-// dispatch 调度器处理。
+// PowerJob 兼容协议配置。/server/* + /openApi/* 端点始终挂载(供遵循 PowerJob 协议的自研 http worker /
+// 业务系统接入;不支持官方 Java processor)。这里只保留 worker 可达地址。无独立调度循环——所有 job
+// 统一由 dispatch 调度器处理。
 type PowerJob struct {
 	ServerAddress string `yaml:"server_address"` // /server/acquire 返回值;PowerJob worker 可达的 host:port
 }
@@ -115,17 +115,16 @@ func Load(path string) (*Config, error) {
 }
 
 // applyEnv 用环境变量覆盖配置(优先级高于配置文件),便于容器/CI 注入密钥与开关,
-// 避免把 mysql dsn / 管理员密码等明文写进 config.yaml。空值视为未设置,不覆盖。
+// 避免把 mysql dsn 等明文写进 config.yaml。空值视为未设置,不覆盖。
+//
+// server.mode 不支持 env 覆盖:env 把 release 降级 debug 会绕过登录限流强制(Validate 据 Mode
+// 判定 release),故 mode 仅由 config.yaml 决定。部署需 release 时改 yaml 或用 config.release.yaml。
 func (c *Config) applyEnv() {
-	// 管理员账户已迁移至 admin_user 表(首次启动 seed admin/admin123,Web 可改),不再支持 env 注入。
 	if v := os.Getenv("TASK_SCHEDULE_DB_DRIVER"); v != "" {
 		c.Database.Driver = v
 	}
 	if v := os.Getenv("TASK_SCHEDULE_MYSQL_DSN"); v != "" {
 		c.Database.MySQL.DSN = v
-	}
-	if v := os.Getenv("TASK_SCHEDULE_SERVER_MODE"); v != "" {
-		c.Server.Mode = v
 	}
 	if v := os.Getenv("TASK_SCHEDULE_POWERJOB_SERVER_ADDRESS"); v != "" {
 		c.PowerJob.ServerAddress = v

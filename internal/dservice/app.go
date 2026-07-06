@@ -149,3 +149,19 @@ func (s *AppService) Verify(appName, password string) (*domain.App, error) {
 	}
 	return app, nil
 }
+
+// VerifyOldPassword 校验 app 旧密码(app 角色改密码前验明正身,对齐管理员 changePassword 的旧码校验)。
+// 旧码为空或校验失败返回 ErrAppUnauthorized;app 不存在返回 ErrAppNotFound。管理员改任意 app 不调此方法。
+func (s *AppService) VerifyOldPassword(id int64, old string) error {
+	app, err := s.st.App.Get(id)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrAppNotFound
+		}
+		return err
+	}
+	if old == "" || bcrypt.CompareHashAndPassword([]byte(app.Password), []byte(old)) != nil {
+		return ErrAppUnauthorized
+	}
+	return nil
+}

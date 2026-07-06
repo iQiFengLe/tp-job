@@ -26,7 +26,7 @@ RUN apk add --no-cache ca-certificates tzdata && \
     adduser -D -u 10001 app
 WORKDIR /app
 COPY --from=go /out/task-schedule ./
-COPY config.yaml ./
+COPY config.yaml config.release.yaml ./
 # 前端管理台已 //go:embed 编译进二进制，运行镜像无需单独携带 web/dist
 RUN mkdir -p /app/data /app/logs && chown -R app:app /app
 USER app

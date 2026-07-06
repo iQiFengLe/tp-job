@@ -103,7 +103,7 @@ func TestSchedulerDispatchesToWorker(t *testing.T) {
 	// 单次查询会撞上中间态(running/queued)致 flaky,故用 waitFor 轮询全部断言条件。
 	var list []domain.Instance
 	waitFor(t, 3*time.Second, func() bool {
-		list, _ = st.Instance.ListGeneralizedActive(0)
+		list, _ = st.Instance.ListGeneralizedActive(time.Time{}, 0)
 		return len(list) == 1 && list[0].Status == domain.StatusWaitingReceive &&
 			list[0].WorkerAddress != "" && list[0].Tag == "t1"
 	}, "应 1 个 waiting_receive 实例并绑 worker+tag")
@@ -140,7 +140,7 @@ func TestSchedulerCronSerial(t *testing.T) {
 
 	// 跑多个 tick,期间实例始终在飞(worker 不回报),应只产生 1 个实例
 	time.Sleep(350 * time.Millisecond)
-	list, _ := st.Instance.ListGeneralizedActive(0)
+	list, _ := st.Instance.ListGeneralizedActive(time.Time{}, 0)
 	if len(list) != 1 {
 		t.Fatalf("串行期应只 1 个在飞实例, got %d", len(list))
 	}
@@ -149,7 +149,7 @@ func TestSchedulerCronSerial(t *testing.T) {
 	sch.ReleaseInFlight(list[0].ID)
 	time.Sleep(20 * time.Millisecond)
 	waitFor(t, 2*time.Second, func() bool {
-		l, _ := st.Instance.ListGeneralizedActive(0)
+		l, _ := st.Instance.ListGeneralizedActive(time.Time{}, 0)
 		return len(l) >= 2 // 释放后下个 tick 又派一个
 	}, "释放后应继续派发")
 }
@@ -282,7 +282,7 @@ func TestRecoverQueued(t *testing.T) {
 	go sch.RunManualDispatcher(ctx)
 
 	waitFor(t, 3*time.Second, func() bool {
-		list, _ := st.Instance.ListGeneralizedActive(0)
+		list, _ := st.Instance.ListGeneralizedActive(time.Time{}, 0)
 		return len(list) == 2
 	}, "恢复的 2 个 queued 实例应都被派发")
 }
@@ -304,7 +304,7 @@ func TestRecoverStaleActiveRetry(t *testing.T) {
 		WorkerAddress: "1.2.3.4:5", RetryIndex: 0}
 	_ = st.Instance.Create(ins)
 
-	if err := sch.RecoverStaleActive(); err != nil {
+	if err := sch.RecoverStaleActive(0); err != nil { // grace=0=不限,保持原"全清理"语义
 		t.Fatalf("RecoverStaleActive 失败: %v", err)
 	}
 	got, _ := st.Instance.Get(ins.ID)
@@ -313,6 +313,68 @@ func TestRecoverStaleActiveRetry(t *testing.T) {
 	}
 	if got.NextRetryTime == nil {
 		t.Fatal("有重试余力应设 next_retry_time(交 RetryPump 重派,重启不丢)")
+	}
+}
+
+// RecoverStaleActive 的 grace 宽限:仅清 start_time < now-grace 的实例(大概率真失联),
+// 近期活跃实例(< grace)交 reaper 按真实失联判定——避免重启即批量失败转移正常执行的长任务。
+func TestRecoverStaleActiveGrace(t *testing.T) {
+	st := newTestStore(t)
+	il := instancelog.New(t.TempDir(), 0)
+	sch := NewScheduler(st, New(workerreg.New(time.Minute, nil), time.Second), il,
+		50*time.Millisecond, discardLog(), NoopCallbackBuilder{})
+
+	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
+	_ = st.Job.Create(&domain.Job{ID: 1, AppID: 1, Name: "j", ExecuteType: "http"})
+
+	old := time.Now().Add(-30 * time.Minute)
+	recent := time.Now().Add(-time.Minute)
+	staleIns := &domain.Instance{JobID: 1, AppID: 1, Status: domain.StatusWaitingReceive,
+		WorkerAddress: "1.2.3.4:5", StartTime: &old}
+	recentIns := &domain.Instance{JobID: 1, AppID: 1, Status: domain.StatusRunning,
+		WorkerAddress: "1.2.3.4:5", StartTime: &recent}
+	_ = st.Instance.Create(staleIns)
+	_ = st.Instance.Create(recentIns)
+
+	if err := sch.RecoverStaleActive(10 * time.Minute); err != nil {
+		t.Fatalf("RecoverStaleActive 失败: %v", err)
+	}
+	gotStale, _ := st.Instance.Get(staleIns.ID)
+	if gotStale.Status != domain.StatusFailed {
+		t.Errorf("超期实例(start_time < now-grace)应转 failed, got %s", gotStale.Status)
+	}
+	gotRecent, _ := st.Instance.Get(recentIns.ID)
+	if gotRecent.Status == domain.StatusFailed {
+		t.Errorf("近期实例(< grace)不应被 RecoverStaleActive 清理(交 reaper), got %s", gotRecent.Status)
+	}
+}
+
+// retryInstance 去重:已存在同 root 且 RetryIndex+1 的重试实例时跳过——防 OpenAPI Retry 与
+// RetryPump 并发触发同一 orig 创建两个相同 RetryIndex 的重试实例。
+func TestRetryInstanceDedup(t *testing.T) {
+	st := newTestStore(t)
+	reg := workerreg.New(time.Minute, nil)
+	il := instancelog.New(t.TempDir(), 0)
+	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog(), NoopCallbackBuilder{})
+
+	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
+	job := &domain.Job{ID: 1, AppID: 1, Name: "j", ExecuteType: "http", MaxConcurrency: 5, RetryCount: 3}
+	_ = st.Job.Create(job)
+
+	orig := &domain.Instance{JobID: 1, AppID: 1, Status: domain.StatusFailed, RetryIndex: 0}
+	_ = st.Instance.Create(orig)
+	// 预建 retry_index=1 的子实例(模拟 RetryPump 已重派一次)
+	_ = st.Instance.Create(&domain.Instance{JobID: 1, AppID: 1, Status: domain.StatusFailed,
+		RetryIndex: 1, RootInstanceID: orig.ID})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sch.retryInstance(ctx, job, orig) // 应因 ExistsRetryChild 跳过,不创建第 2 个 retry_index=1
+
+	var count int64
+	st.DB.Model(&domain.Instance{}).Where("retry_index = ? AND root_instance_id = ?", 1, orig.ID).Count(&count)
+	if count != 1 {
+		t.Errorf("已存在 retry_index=1 子实例时应跳过重复创建, got count=%d", count)
 	}
 }
 
@@ -376,7 +438,7 @@ func TestRecoverQueuedAllTypes(t *testing.T) {
 	defer cancel()
 	go sch.RunManualDispatcher(ctx)
 	waitFor(t, 3*time.Second, func() bool {
-		list, _ := st.Instance.ListGeneralizedActive(0)
+		list, _ := st.Instance.ListGeneralizedActive(time.Time{}, 0)
 		return len(list) == 2
 	}, "auto/retry 的 queued 实例应都被恢复派发")
 }
@@ -479,7 +541,7 @@ func TestSchedulerWindowStartFuture(t *testing.T) {
 		j, err := st.Job.Get(1, job.ID)
 		return err == nil && j.NextRunTime != nil && !j.NextRunTime.Before(start)
 	}, "start 前应把 next_run 推进到 start_time")
-	if list, _ := st.Instance.ListGeneralizedActive(0); len(list) != 0 {
+	if list, _ := st.Instance.ListGeneralizedActive(time.Time{}, 0); len(list) != 0 {
 		t.Fatalf("start 前不应创建实例, got %d", len(list))
 	}
 }
@@ -508,7 +570,7 @@ func TestSchedulerWindowEndPast(t *testing.T) {
 		j, err := st.Job.Get(1, job.ID)
 		return err == nil && j.NextRunTime == nil && j.Enabled
 	}, "end 后应 next_run=nil 且保持 enabled")
-	if list, _ := st.Instance.ListGeneralizedActive(0); len(list) != 0 {
+	if list, _ := st.Instance.ListGeneralizedActive(time.Time{}, 0); len(list) != 0 {
 		t.Fatalf("end 后不应创建实例, got %d", len(list))
 	}
 }

@@ -123,9 +123,10 @@ func (s *JobService) Update(appID, id int64, fields map[string]any) error {
 	return s.st.Job.Update(id, fields)
 }
 
-// hasScheduleChange 判断更新是否影响调度(需重算 next_run)。
+// hasScheduleChange 判断更新是否影响调度(需重算 next_run)。含生效窗口字段:改 start_time/
+// end_time 也需重算,否则窗口已变而游标仍指旧值(本期跳过/滞留)。
 func hasScheduleChange(fields map[string]any) bool {
-	for _, k := range []string{"schedule_kind", "schedule_expr", "enabled"} {
+	for _, k := range []string{"schedule_kind", "schedule_expr", "enabled", "start_time", "end_time"} {
 		if _, ok := fields[k]; ok {
 			return true
 		}
@@ -201,8 +202,22 @@ func toInt(v any) int {
 	return 0
 }
 
+// Delete 删除 job 并级联清理其实例与回调记录(避免孤儿数据;实例日志文件靠 instance_retention_days 清理)。
+// 同事务:job / instance / callback 三表删除原子,失败整体回滚;job 不存在返回 ErrJobNotFound。
 func (s *JobService) Delete(appID, id int64) error {
-	return s.st.Job.Delete(appID, id)
+	return s.st.DB.Transaction(func(tx *gorm.DB) error {
+		res := tx.Where("app_id = ? AND id = ?", appID, id).Delete(&domain.Job{})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return ErrJobNotFound
+		}
+		if err := tx.Where("job_id = ?", id).Delete(&domain.Instance{}).Error; err != nil {
+			return err
+		}
+		return tx.Where("job_id = ?", id).Delete(&domain.Callback{}).Error
+	})
 }
 
 func (s *JobService) Get(appID, id int64) (*domain.Job, error) {

@@ -113,11 +113,12 @@ func TestCallbackSendNon2xx(t *testing.T) {
 	}
 }
 
-// send 成功但 MarkSent 记账失败(DB 瞬时故障)→ 应转 handleFail 推进退避(attempt 增长、next_retry_at
-// 推进),受 MaxAttempts 上限保护;而非停留 attempt=0/pending/next_retry_at<=now 导致下轮立即重投、
-// 永不触达上限。回归:原实现 MarkSent 失败仅记 Error 日志。
+// send 成功但 MarkSent 记账失败(DB 瞬时故障)→ markProgress 已在 MarkSent 之前乐观推进 attempt+退避,
+// 故 cb 保持 attempt+1 + 未来 next_retry_at,下轮按退避重投,attempt 受 MaxAttempts 上限保护可达 dead;
+// 而非停留 attempt=0/pending/next_retry_at<=now 导致下轮立即重投、永不触达上限。
 // 故障注入:sqlite 触发器,UPDATE 到 state=sent 时 RAISE(FAIL),精确模拟 MarkSent 失败
-// (ListDue 是 SELECT、Create 是 INSERT、MarkRetry 不改 state,均不触发,故只让 MarkSent 失败)。
+// (ListDue 是 SELECT、Create 是 INSERT、MarkRetry 不改 state,均不触发,故只让 MarkSent 失败;
+// markProgress 的 MarkRetry 不改 state 也不触发)。
 func TestCallbackMarkSentFailureRetries(t *testing.T) {
 	st := newTestStore(t)
 	if err := st.DB.Exec(`CREATE TRIGGER fail_sent BEFORE UPDATE ON instance_callback
@@ -141,7 +142,7 @@ WHEN NEW.state = 'sent' BEGIN SELECT RAISE(FAIL, 'injected marksent failure'); E
 		t.Fatal(err)
 	}
 
-	p.once(context.Background()) // send 成功 → MarkSent 失败(触发器)→ 转 handleFail
+	p.once(context.Background()) // send 成功 → markProgress 乐观推进 → MarkSent 失败(触发器),cb 保持退避
 
 	var got domain.Callback
 	if err := st.DB.First(&got, cb.ID).Error; err != nil {
@@ -156,7 +157,31 @@ WHEN NEW.state = 'sent' BEGIN SELECT RAISE(FAIL, 'injected marksent failure'); E
 	if got.NextRetryAt == nil || got.NextRetryAt.Before(time.Now()) {
 		t.Error("next_retry_at 应退避到未来,而非停留 now 致下轮立即重投")
 	}
-	if got.LastError == "" {
-		t.Error("last_error 应记录 MarkSent 记账失败原因")
+	// last_error:markProgress 的 MarkRetry 写空(MarkSent 失败原因只进日志,不回写 DB)。
+	// 核心保证已在上面三项:attempt 推进 + 仍 pending + next_retry_at 退避到未来 → 下轮重投 attempt 受上限约束。
+}
+
+// *WithCallback 的 build 闭包应拿到 tx 内 UPDATE 后 SELECT 出的最新行(事件瞬间值),
+// 而非 tx 外的读快照——避免并发改 DB 期间 payload stale(TOCTOU)。
+func TestUpdateResultWithCallbackBuildGetsLatest(t *testing.T) {
+	st := newTestStore(t)
+	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
+	ins := &domain.Instance{JobID: 1, AppID: 1, Status: domain.StatusQueued, Result: "old"}
+	_ = st.Instance.Create(ins)
+
+	var captured *domain.Instance
+	build := func(latest *domain.Instance) *domain.Callback {
+		captured = latest
+		return nil // 不插 cb,仅验证 latest
+	}
+	if _, err := st.Instance.UpdateResultWithCallback(ins.ID, domain.StatusRunning, "ok", build); err != nil {
+		t.Fatal(err)
+	}
+	if captured == nil {
+		t.Fatal("build 闭包未被调用")
+	}
+	if captured.Status != domain.StatusRunning || captured.Result != "ok" {
+		t.Errorf("build 收到的 latest 应为 tx 写入后的值(status=running/result=ok), got status=%s result=%s (TOCTOU:用了读快照)",
+			captured.Status, captured.Result)
 	}
 }

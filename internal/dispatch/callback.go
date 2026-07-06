@@ -254,13 +254,42 @@ func (p *CallbackPump) once(ctx context.Context) {
 			p.handleFail(&cb, err)
 			continue
 		}
-		// send 已成功(对端收到)。MarkSent 失败(DB 瞬时不可用)时不能只记日志——否则 cb 仍 pending
-		// 且 next_retry_at 未推进,下轮 ListDue 立即重投,attempt 永不增长,无 MaxAttempts 上限保护。
-		// 改为走 handleFail 推进退避(下次重投),让 attempt 增长受上限约束,避免 DB 抖动下无限重投。
+		// send 已成功(对端收到)。先乐观持久化 attempt+1 + 退避 next_retry_at,再 MarkSent 收尾:
+		// MarkSent 失败(DB 瞬时故障)时 cb 仍 pending,但 attempt 已推进 + next_retry_at 已退避,
+		// 下轮 ListDue 按退避重投,attempt 受 maxAtt 约束可达 dead 终止——避免旧版"MarkSent 失败→
+		// handleFail→MarkRetry 也失败"时 attempt 永不增长、DB 抖动下已投递成功的回调被无限重投。
+		// 正常路径(MarkSent 成功)多一次 UPDATE,callback 非高频热路径,可接受。
+		p.markProgress(&cb)
 		if err := p.store.Callback.MarkSent(cb.ID); err != nil {
-			p.log.Warn("callback MarkSent 记账失败,转入退避重投", "id", cb.ID, "err", err)
-			p.handleFail(&cb, fmt.Errorf("MarkSent 记账失败: %w", err))
+			p.log.Warn("callback MarkSent 记账失败(已乐观推进退避,下轮按退避重投)", "id", cb.ID, "err", err)
 		}
+	}
+}
+
+// backoff 指数退避:backBase * 2^attempt,clamp 到 backMax(防移位溢出/下溢致每 tick 捞出)。
+// markProgress(乐观推进)与 handleFail(失败重试)共用,确保两路径退避节奏一致。
+func (p *CallbackPump) backoff(attempt int) time.Duration {
+	d := p.backBase * time.Duration(int64(1)<<uint(attempt))
+	if d <= 0 || d > p.backMax {
+		d = p.backMax
+	}
+	return d
+}
+
+// markProgress send 成功后乐观持久化 attempt+1 + 退避 next_retry_at(MarkSent 之前调)。
+// 达 maxAtt 时 MarkDead 终止后续重投(此时 send 已成功,dead 表"本地放弃记账",对端大概率已收到)。
+// 失败只记日志:极端 DB 持续全故障下 attempt 无法推进(物理限制,无法纯软件兜底)。
+func (p *CallbackPump) markProgress(cb *domain.Callback) {
+	attempt := cb.Attempt + 1
+	if attempt >= p.maxAtt {
+		if e := p.store.Callback.MarkDead(cb.ID, "记账达上限(send 已成功)"); e != nil {
+			p.log.Error("callback MarkDead 失败", "id", cb.ID, "err", e)
+		}
+		return
+	}
+	next := time.Now().Add(p.backoff(attempt))
+	if e := p.store.Callback.MarkRetry(cb.ID, attempt, next, ""); e != nil {
+		p.log.Error("callback 乐观 MarkRetry 失败", "id", cb.ID, "err", e)
 	}
 }
 
@@ -297,13 +326,7 @@ func (p *CallbackPump) handleFail(cb *domain.Callback, err error) {
 		p.log.Warn("callback 达上限放弃", "id", cb.ID, "attempt", attempt, "err", err)
 		return
 	}
-	delay := p.backBase * time.Duration(int64(1)<<uint(attempt)) // 2^attempt
-	// attempt 较大时移位/乘法可能下溢为负或上溢(cfg.MaxAttempts 配得过大时),一律 clamp 到 backMax,
-	// 避免负/零 delay 触发 ListDue 每 tick 立即捞出打爆 callback_url。
-	if delay <= 0 || delay > p.backMax {
-		delay = p.backMax
-	}
-	next := time.Now().Add(delay)
+	next := time.Now().Add(p.backoff(attempt))
 	if e := p.store.Callback.MarkRetry(cb.ID, attempt, next, err.Error()); e != nil {
 		p.log.Error("callback MarkRetry 失败", "id", cb.ID, "err", e)
 	}

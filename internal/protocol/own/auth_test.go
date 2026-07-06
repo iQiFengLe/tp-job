@@ -131,8 +131,12 @@ func TestOwnAuthMatrix(t *testing.T) {
 	wantCode(t, "app GET 自家 jobs", authReq(t, g, "GET", "/api/apps/"+itoa(app1)+"/jobs", nil, appTok), 200)
 	wantCode(t, "app GET 自家 app", authReq(t, g, "GET", "/api/apps/"+itoa(app1), nil, appTok), 200)
 
-	// app 角色:更新自家 app(改密码)→ 200
-	wantCode(t, "app PUT 自家 app", authReq(t, g, "PUT", "/api/apps/"+itoa(app1), UpdateAppReq{Password: strPtr("new")}, appTok), 200)
+	// app 角色:更新自家 app(改密码须验旧密码 → 200);admin 改任意 app 不验旧码(特权)
+	wantCode(t, "app PUT 自家 app(改密带旧码)", authReq(t, g, "PUT", "/api/apps/"+itoa(app1), UpdateAppReq{OldPassword: strPtr("secret"), Password: strPtr("new")}, appTok), 200)
+	wantCode(t, "app PUT 改密码缺旧码→400", authReq(t, g, "PUT", "/api/apps/"+itoa(app1), UpdateAppReq{Password: strPtr("new2")}, appTok), 400)
+	wantCode(t, "app PUT 改密码错旧码→400", authReq(t, g, "PUT", "/api/apps/"+itoa(app1), UpdateAppReq{OldPassword: strPtr("wrong"), Password: strPtr("new2")}, appTok), 400)
+	wantCode(t, "app PUT 改 appName(非密码不验旧码)", authReq(t, g, "PUT", "/api/apps/"+itoa(app1), UpdateAppReq{AppName: strPtr("app1-x")}, appTok), 200)
+	wantCode(t, "admin PUT app2 改密不验旧码", authReq(t, g, "PUT", "/api/apps/"+itoa(app2), UpdateAppReq{Password: strPtr("admin-set")}, adminTok), 200)
 
 	// —— 鉴权失败链路 ——
 	wantCode(t, "无 token", authReq(t, g, "GET", "/api/apps", nil, ""), 401)

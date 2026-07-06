@@ -262,13 +262,8 @@ POST /server/reportLog               {instanceLogContents:[...]}
 
 ## 9. 管理端鉴权(账户 / 登录会话)
 
-- **管理员账户**:配置 + 环境变量(不入库);release 拒绝默认/空密码启动。
-  ```yaml
-  auth:
-    admins:
-      - username: admin
-        password: "<bcrypt>"   # 推荐 TASK_SCHEDULE_ADMIN_PASSWORD 注入
-  ```
+- **管理员账户**:admin_user 表(首次启动 seed admin/admin123,Web 可改用户名/密码;**已迁出 config/env**,
+  `TASK_SCHEDULE_ADMIN_PASSWORD` 等环境变量不再生效)。release 模式由 `config.release.yaml` 控制(不再经 env 覆盖 mode)。
 - **应用账户**:`app` 表(AppName + Password)。
 - `POST /api/auth/login {ident, password}` → session token;先匹配 admins(管理员)否则匹配 `app.AppName`(应用)。
 - 后续 `Authorization: Bearer <token>`;`SessionAuth()` 解析 `{role, appID?}`。
@@ -365,7 +360,7 @@ internal/
 - [ ] `/api/.../instances/:iid/logs` 改读 `InstanceLogger.Read`(`?group=1` 同 root)
 
 ### 阶段 4:管理端账户/登录
-- [ ] admins 配置 + `TASK_SCHEDULE_ADMIN_PASSWORD` + release 防呆
+- [x] 管理员账户 admin_user 表(seed admin/admin123,Web 可改;已迁出 config/env)+ release 防呆(config.release.yaml)
 - [ ] `POST /api/auth/login` + session token + `SessionAuth()`
 - [ ] 权限矩阵(新增/删除 app 仅 admin;资源 CRUD 越权校验)+ 管理员切换 app
 - [ ] 前端:登录页 + 应用切换器 + 按 role 显隐

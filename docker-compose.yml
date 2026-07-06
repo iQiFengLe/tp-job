@@ -7,17 +7,15 @@ services:
     ports:
       - "8080:8080"
     environment:
-      # —— 鉴权(必填)—— release 模式下使用默认占位密码 admin/change-me-admin 会拒绝启动。
-      # 用 openssl rand -hex 16 生成强密码注入;或 config.yaml 填 bcrypt 哈希。
-      TASK_SCHEDULE_ADMIN_USERNAME: ${TASK_SCHEDULE_ADMIN_USERNAME:-admin}
-      TASK_SCHEDULE_ADMIN_PASSWORD: ${TASK_SCHEDULE_ADMIN_PASSWORD:?release 模式必须设置 TASK_SCHEDULE_ADMIN_PASSWORD(用 openssl rand -hex 16 生成)}
       TASK_SCHEDULE_DB_DRIVER: sqlite
       TZ: Asia/Shanghai
-      # 生产显式 release(关闭 gin 敏感路由日志);config.yaml 默认 debug 便于本地开箱即用
-      TASK_SCHEDULE_SERVER_MODE: release
       # TASK_SCHEDULE_MYSQL_DSN: "user:pass@tcp(mysql:3306)/task_schedule?charset=utf8mb4&parseTime=True&loc=Local"
       # ⚠ 容器化部署:必须是 PowerJob Worker 可达地址,绝不能用 127.0.0.1(那是容器自身)
       # TASK_SCHEDULE_POWERJOB_SERVER_ADDRESS: "task-schedule:8080"
+    # 生产用 release 配置(config.release.yaml:mode=release + 登录限流)。
+    # server.mode 不支持 env 覆盖(防降级绕过 release 限流强制),故通过指定配置文件设 release。
+    # 管理员账户:首次启动 seed admin/admin123,登录后立即 Web 改密。
+    command: ["-config", "config.release.yaml"]
     volumes:
       - ./data:/app/data   # sqlite 数据持久化(切 mysql 后可移除)
       - ./logs:/app/logs   # 日志 + 实例日志持久化

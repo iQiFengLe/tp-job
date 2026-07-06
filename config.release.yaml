@@ -1,0 +1,56 @@
+# 任务调度服务配置 — 生产 release 模式
+# 与 config.yaml 的差异:server.mode=release + 显式登录限流。
+# server.mode 不支持 env 覆盖(防降级绕过 release 限流强制),故 docker-compose 通过指定本文件启动。
+# 管理员账户:首次启动 seed admin/admin123,登录后立即在 Web「账户设置」改密。
+
+server:
+  port: 8080
+  mode: release          # release:关闭 gin 敏感路由日志 + 强制登录限流
+  max_request_body_mb: 2
+
+database:
+  driver: sqlite         # sqlite | mysql(生产高负载建议 mysql)
+  sqlite:
+    path: ./data/task-schedule.db
+  mysql:
+    # 生产请用最小权限账号 + 强密码,或环境变量 TASK_SCHEDULE_MYSQL_DSN 注入。
+    dsn: "root:root@tcp(127.0.0.1:3306)/task_schedule?charset=utf8mb4&parseTime=True&loc=Local"
+    max_open_conns: 50
+    max_idle_conns: 10
+
+log:
+  level: info
+  dir: ./logs
+  file_name: task-schedule.log
+  max_size_mb: 100
+  max_backups: 10
+  max_age_days: 30
+  instance_retention_days: 0
+
+scheduler:
+  interval_ms: 1000
+  callback:
+    enabled: true
+    max_attempts: 8
+    backoff_base_sec: 10
+    backoff_max_sec: 3600
+    timeout_sec: 10
+    retention_days: 7
+
+worker:
+  timeout_seconds: 600
+  # 生产建议填可信 worker 网段(SSRF 纵深防御):如 ["10.0.0.0/8", "192.168.0.0/16"]
+  # allowed_cidrs: ["10.0.0.0/8"]
+
+powerjob:
+  # ⚠ 容器化部署必须是 worker 可达地址,绝不能用 127.0.0.1(那是容器自身);如 "task-schedule:8080"
+  server_address: "127.0.0.1:8080"
+
+auth:
+  session:
+    ttl_seconds: 86400
+  login:
+    max_attempts_per_min: 10   # release 强制要求(防爆破 + bcrypt DoS)
+
+# 环境变量(优先级高于本文件):TASK_SCHEDULE_DB_DRIVER / TASK_SCHEDULE_MYSQL_DSN / TASK_SCHEDULE_POWERJOB_SERVER_ADDRESS
+# server.mode 不支持 env 覆盖。

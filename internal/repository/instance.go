@@ -168,15 +168,23 @@ func (s InstanceStore) ListRetryDue(now time.Time, limit int) ([]domain.Instance
 // limit<=0 取默认上限,避免活跃实例极多时单轮全表扫打爆;调用方应批量预加载 job 消除 N+1。
 // 按 start_time 升序:stallReason 的超时判定亦基于 start_time,卡得最久(最可能 stalled)的实例
 // 优先落在 limit 窗口内——无 ORDER BY 时 DB 返回物理顺序,活跃数 > limit 时可能让不可回收的长任务
-// 占满窗口,而真正 stalled 的实例(start_time 更小)反被截断漏扫。waiting/running 实例派发时即设
+// 占满窗口,而真正 stalled 的实例(start_time 更小)反被截断漏扫。waiting/running 实例派发即设
 // start_time,非空,无需考虑 NULL 排序。
-func (s InstanceStore) ListGeneralizedActive(limit int) ([]domain.Instance, error) {
+//
+// olderThan 非零时仅返回 start_time < olderThan 的实例:RecoverStaleActive 据此只清理"重启前
+// 已超 grace"的实例(大概率真失联),近期活跃实例交 reaper 按真实失联(心跳/TimeoutSec)判定——
+// 避免重启即批量失败转移仍在正常执行的长任务。reaper 调用传 time.Time{}(零值=不限)。
+func (s InstanceStore) ListGeneralizedActive(olderThan time.Time, limit int) ([]domain.Instance, error) {
 	if limit <= 0 {
 		limit = 500
 	}
 	var list []domain.Instance
-	err := s.db.Where("status IN ?", []string{domain.StatusWaitingReceive, domain.StatusRunning}).
-		Order("start_time ASC").Limit(limit).Find(&list).Error
+	q := s.db.Where("status IN ?", []string{domain.StatusWaitingReceive, domain.StatusRunning})
+	if !olderThan.IsZero() {
+		// NULL start_time(异常/迁移脏数据,正常派发实例必设)视为超期一并清理,避免滞留。
+		q = q.Where("start_time < ? OR start_time IS NULL", olderThan)
+	}
+	err := q.Order("start_time ASC").Limit(limit).Find(&list).Error
 	return list, err
 }
 
@@ -215,13 +223,19 @@ func (s InstanceStore) ListUnboundQueued(staleThreshold time.Duration) ([]domain
 
 // ===== 状态变更 + 回调(同事务) =====
 //
-// *WithCallback 系列在写实例状态的同事务内顺带插入一条 callback 记录(cb 非 nil 时)。
-// 返回 RowsAffected:status 实际变化(匹配 WHERE)才 >0,调用方据此决定是否计入"真事件"。
-// cb.InstanceID 在事务内(ins 创建后 / 已知 id)回填。原方法(Create/MarkDispatched/...)保留无回调路径。
+// *WithCallback 系列在写实例状态的同事务内顺带插入一条 callback 记录。build 是闭包:接收 tx 内
+// UPDATE 后 SELECT 出的最新实例行,返回待入库的 callback。闭包拿 latest 构造 payload,保证快照
+// 是事件瞬间 DB 真实值(避免"读快照构造 cb 期间并发改 DB"的 TOCTOU 致 payload stale)。返回
+// RowsAffected:status 实际变化(匹配 WHERE)才 >0,调用方据此判断是否真事件。
+//
+// build==nil(回调未启用 Noop)时:CreateWithCallback/MarkDispatchedWithCallback/SetStatusWithCallback
+// 走原无回调快捷路径(免事务开销);UpdateResultWithCallback/FailDispatchWithCallback 仍走事务以返回
+// 真实 RowsAffected(reaper/recover/failDispatch 据此判断实例是否已被并发终结),rows>0 且 build==nil
+// 时不插 cb。build(latest)==nil(job 无 callback_url)亦不插 cb(走事务但无 cb 写入)。
 
-// CreateWithCallback 创建实例;build 非 nil 时在 Create 后(ins.ID 已填)调用,同事务插入回调。
-// 用 build 闭包而非预构造 cb:保证 payload 快照里的 instance.id 是 Create 后的真实 ID(而非 0)。
-func (s InstanceStore) CreateWithCallback(ins *domain.Instance, build func() *domain.Callback) error {
+// CreateWithCallback 创建实例;build 非 nil 时在 Create 后(ins 已含自增 ID,作为 latest)调用,
+// 同事务插入回调。用 build 闭包而非预构造 cb:保证 payload 快照里的 instance 字段是 Create 后真实值。
+func (s InstanceStore) CreateWithCallback(ins *domain.Instance, build func(latest *domain.Instance) *domain.Callback) error {
 	if build == nil {
 		return s.db.Create(ins).Error
 	}
@@ -229,7 +243,7 @@ func (s InstanceStore) CreateWithCallback(ins *domain.Instance, build func() *do
 		if err := tx.Create(ins).Error; err != nil {
 			return err
 		}
-		cb := build() // ins.ID 已由 Create 填充
+		cb := build(ins) // ins 已由 Create 填充,作为 latest
 		if cb == nil {
 			return nil
 		}
@@ -238,10 +252,10 @@ func (s InstanceStore) CreateWithCallback(ins *domain.Instance, build func() *do
 	})
 }
 
-// MarkDispatchedWithCallback 置 waiting_receive;status 真变化(rows>0)且 cb 非 nil 才插回调。
+// MarkDispatchedWithCallback 置 waiting_receive;status 真变化(rows>0)且 build(latest) 非 nil 才插回调。
 // rows==0(终态守护)时不插回调;worker_address/start_time 残留语义同 MarkDispatched。
-func (s InstanceStore) MarkDispatchedWithCallback(id int64, workerAddress string, cb *domain.Callback) (int64, error) {
-	if cb == nil {
+func (s InstanceStore) MarkDispatchedWithCallback(id int64, workerAddress string, build func(latest *domain.Instance) *domain.Callback) (int64, error) {
+	if build == nil {
 		return s.MarkDispatched(id, workerAddress) // 无回调走原路径,免事务开销(返回真实 rows)
 	}
 	var rows int64
@@ -262,16 +276,24 @@ func (s InstanceStore) MarkDispatchedWithCallback(id int64, workerAddress string
 		if rows == 0 {
 			return nil // 已终态守护未改
 		}
+		var latest domain.Instance
+		if err := tx.Where("id = ?", id).First(&latest).Error; err != nil {
+			return err
+		}
+		cb := build(&latest)
+		if cb == nil {
+			return nil
+		}
 		cb.InstanceID = id
 		return tx.Create(cb).Error
 	})
 	return rows, err
 }
 
-// UpdateResultWithCallback 写状态/结果(终态守护);status 真变化(rows>0)且 cb 非 nil 才插回调。
-// cb==nil 仍走事务(不插回调)以返回真实 RowsAffected——reaper/recover 据此判断实例是否已被
-// 并发终结,不能早返回到不返回 rows 的 UpdateResult 快路径。
-func (s InstanceStore) UpdateResultWithCallback(id int64, status, result string, cb *domain.Callback) (int64, error) {
+// UpdateResultWithCallback 写状态/结果(终态守护);status 真变化(rows>0)且 build(latest) 非 nil 才插回调。
+// 始终走事务(即便 build==nil)以返回真实 RowsAffected——reaper/recover 据此判断实例是否已被并发终结,
+// 不能早返回到不返回 rows 的 UpdateResult 快路径。
+func (s InstanceStore) UpdateResultWithCallback(id int64, status, result string, build func(latest *domain.Instance) *domain.Callback) (int64, error) {
 	var rows int64
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		res := tx.Model(&domain.Instance{}).
@@ -281,7 +303,15 @@ func (s InstanceStore) UpdateResultWithCallback(id int64, status, result string,
 			return res.Error
 		}
 		rows = res.RowsAffected
-		if rows == 0 || cb == nil {
+		if rows == 0 || build == nil {
+			return nil
+		}
+		var latest domain.Instance
+		if err := tx.Where("id = ?", id).First(&latest).Error; err != nil {
+			return err
+		}
+		cb := build(&latest)
+		if cb == nil {
 			return nil
 		}
 		cb.InstanceID = id
@@ -291,13 +321,13 @@ func (s InstanceStore) UpdateResultWithCallback(id int64, status, result string,
 }
 
 // FailDispatchWithCallback 派发失败善后专用:置 failed + 清 worker_address/start_time + end_time,
-// status 真变化(rows>0)且 cb 非 nil 才插回调。
+// status 真变化(rows>0)且 build(latest) 非 nil 才插回调。始终走事务以返回真实 RowsAffected
+// (failDispatch 据此决定是否 scheduleRetry)。终态守护:并发 stop/cancel 已置终态时 rows=0,不覆盖。
 //
 // 清 worker 绑定是因为派发失败(选后即绑下 Send 失败时 worker_address 已先于 POST commit),
 // 该绑定无意义且会误导(展示一个 failed 实例仍指向某 worker);与 worker 回报 failed(保留
 // worker_address 供审计"哪个 worker 执行失败")路径区分,故不复用 UpdateResultWithCallback。
-// 终态守护同 UpdateResultWithCallback:并发 stop/cancel 已置终态时 rows=0,不覆盖。
-func (s InstanceStore) FailDispatchWithCallback(id int64, reason string, cb *domain.Callback) (int64, error) {
+func (s InstanceStore) FailDispatchWithCallback(id int64, reason string, build func(latest *domain.Instance) *domain.Callback) (int64, error) {
 	var rows int64
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		fields := map[string]any{
@@ -316,21 +346,26 @@ func (s InstanceStore) FailDispatchWithCallback(id int64, reason string, cb *dom
 			return res.Error
 		}
 		rows = res.RowsAffected
-		if rows == 0 {
+		if rows == 0 || build == nil {
 			return nil
 		}
-		if cb != nil {
-			cb.InstanceID = id
-			return tx.Create(cb).Error
+		var latest domain.Instance
+		if err := tx.Where("id = ?", id).First(&latest).Error; err != nil {
+			return err
 		}
-		return nil
+		cb := build(&latest)
+		if cb == nil {
+			return nil
+		}
+		cb.InstanceID = id
+		return tx.Create(cb).Error
 	})
 	return rows, err
 }
 
-// SetStatusWithCallback 强制写状态(无守护);rows>0 且 cb 非 nil 才插回调。
-func (s InstanceStore) SetStatusWithCallback(id int64, status, result string, cb *domain.Callback) (int64, error) {
-	if cb == nil {
+// SetStatusWithCallback 强制写状态(无守护);rows>0 且 build(latest) 非 nil 才插回调。
+func (s InstanceStore) SetStatusWithCallback(id int64, status, result string, build func(latest *domain.Instance) *domain.Callback) (int64, error) {
+	if build == nil {
 		return 0, s.SetStatus(id, status, result) // 无回调走原路径
 	}
 	var rows int64
@@ -343,8 +378,29 @@ func (s InstanceStore) SetStatusWithCallback(id int64, status, result string, cb
 		if rows == 0 {
 			return nil
 		}
+		var latest domain.Instance
+		if err := tx.Where("id = ?", id).First(&latest).Error; err != nil {
+			return err
+		}
+		cb := build(&latest)
+		if cb == nil {
+			return nil
+		}
 		cb.InstanceID = id
 		return tx.Create(cb).Error
 	})
 	return rows, err
+}
+
+// ExistsRetryChild 是否已存在同 root 且指定 retry_index 的重试实例(retryInstance 去重用,
+// 防 OpenAPI Retry 与 RetryPump 对同一 orig 创建两个相同 RetryIndex 的重试实例,破坏重试链语义)。
+func (s InstanceStore) ExistsRetryChild(rootID, retryIndex int64) (bool, error) {
+	if rootID <= 0 || retryIndex <= 0 {
+		return false, nil
+	}
+	var n int64
+	err := s.db.Model(&domain.Instance{}).
+		Where("root_instance_id = ? AND retry_index = ?", rootID, retryIndex).
+		Limit(1).Count(&n).Error
+	return n > 0, err
 }

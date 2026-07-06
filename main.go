@@ -102,10 +102,10 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 启动清理:把重启前未终结(waiting_receive/running)的实例做失败转移(UpdateResult(failed)
-	// + scheduleRetry)。有重试余力的实例设 next_retry_time 由 RetryPump 接管重派——重启不丢,
-	// 取代旧 MarkStaleActiveAsFailed 的 bulk 标记(旧版不衔接重试,在飞实例被静默放弃)。
-	if err := sch.RecoverStaleActive(); err != nil {
+	// 启动清理:把重启前未终结(waiting_receive/running)且已超 worker 心跳超时(grace)的实例做失败转移
+	// (UpdateResult(failed) + scheduleRetry)。近期活跃实例交 reaper 按真实失联判定——避免重启即批量
+	// 失败转移仍在正常执行的长任务(worker 迟到 success 被终态守护拒绝 → 重复执行)。
+	if err := sch.RecoverStaleActive(time.Duration(cfg.Worker.TimeoutSeconds) * time.Second); err != nil {
 		log.Error("清理僵尸实例失败", "err", err)
 	}
 

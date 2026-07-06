@@ -1,8 +1,8 @@
-// Package powerjob 的 OpenAPI 兼容层(/openApi/*):对齐原版 PowerJob server 的 OpenAPIController,
-// 让原对接 PowerJob 的业务客户端(Java 等)零改动接入 task-schedule。
+// OpenAPI 兼容层(/openApi/*):对齐原版 PowerJob server 的 OpenAPIController,
+// 让原对接 PowerJob 的业务客户端(自研 HTTP 调用)零改动接入 task-schedule。
 //
 // 覆盖 PowerJob OpenAPI 的 App/Job/Instance 区共 18 个端点(路径/DTO 对齐 powerjob-common)。
-// Workflow/WorkflowInstance 区(13 个)因 task-schedule 无工作流模型,未实现。
+// Workflow/WorkflowInstance 区(13 个)因 task-schedule 无工作流模型,未实现。不支持官方 Java SDK。
 //
 // 鉴权对齐 PowerJob OpenAPI 默认信任 + 本项目"靠网络隔离"约定(业务客户端普遍不带 token 直连);
 // 生产隔离由部署侧保证(见 deploy/nginx-isolation.conf.example,勿暴露公网)。
@@ -231,9 +231,10 @@ func jobToDTO(j *domain.Job) JobInfoDTO {
 	}
 }
 
-func instanceToDTO(ins *domain.Instance) InstanceInfoDTO {
+func instanceToDTO(ins *domain.Instance, jobParams string) InstanceInfoDTO {
 	return InstanceInfoDTO{
 		JobID:               ins.JobID, AppID: ins.AppID, InstanceID: ins.ID,
+		JobParams:           jobParams,
 		InstanceParams:      ins.JobInstanceParams,
 		Status:              DomainToWire(ins.Status),
 		Result:              ins.Result,
@@ -615,7 +616,11 @@ func (d OpenApiDeps) fetchInstanceInfo(c *gin.Context) {
 		c.JSON(http.StatusOK, ResultFail(err.Error()))
 		return
 	}
-	c.JSON(http.StatusOK, ResultOK(instanceToDTO(ins)))
+	jobParams := ""
+	if job, err := d.Jobs.Get(ins.AppID, ins.JobID); err == nil {
+		jobParams = job.JobParams
+	}
+	c.JSON(http.StatusOK, ResultOK(instanceToDTO(ins, jobParams)))
 }
 
 func (d OpenApiDeps) stopInstance(c *gin.Context) {
@@ -673,7 +678,11 @@ func (d OpenApiDeps) queryInstance(c *gin.Context) {
 			c.JSON(http.StatusOK, ResultOK(PageResult{Index: q.Index, PageSize: q.PageSize, Data: []InstanceInfoDTO{}}))
 			return
 		}
-		c.JSON(http.StatusOK, ResultOK(PageResult{Index: q.Index, PageSize: q.PageSize, TotalItems: 1, TotalPages: 1, Data: []InstanceInfoDTO{instanceToDTO(ins)}}))
+		jobParams := ""
+		if job, err := d.Jobs.Get(ins.AppID, ins.JobID); err == nil {
+			jobParams = job.JobParams
+		}
+		c.JSON(http.StatusOK, ResultOK(PageResult{Index: q.Index, PageSize: q.PageSize, TotalItems: 1, TotalPages: 1, Data: []InstanceInfoDTO{instanceToDTO(ins, jobParams)}}))
 		return
 	}
 	// 分页:PowerJob index 0-based → task-schedule page 1-based
@@ -699,9 +708,26 @@ func (d OpenApiDeps) queryInstance(c *gin.Context) {
 		c.JSON(http.StatusOK, ResultFail(err.Error()))
 		return
 	}
+	// 批量预加载 jobParams(消除 N+1),仿 own listInstances 的 ListByIDs 模式
+	jobSet := make(map[int64]struct{}, len(list))
+	for i := range list {
+		jobSet[list[i].JobID] = struct{}{}
+	}
+	jobIDs := make([]int64, 0, len(jobSet))
+	for id := range jobSet {
+		jobIDs = append(jobIDs, id)
+	}
+	params := make(map[int64]string, len(jobIDs))
+	if len(jobIDs) > 0 {
+		if jobs, err := d.Store.Job.ListByIDs(jobIDs); err == nil {
+			for i := range jobs {
+				params[jobs[i].ID] = jobs[i].JobParams
+			}
+		}
+	}
 	out := make([]InstanceInfoDTO, 0, len(list))
 	for i := range list {
-		out = append(out, instanceToDTO(&list[i]))
+		out = append(out, instanceToDTO(&list[i], params[list[i].JobID]))
 	}
 	totalPages := 0
 	if total > 0 {
