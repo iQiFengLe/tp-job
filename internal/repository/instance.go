@@ -26,18 +26,25 @@ func (s InstanceStore) Get(id int64) (*domain.Instance, error) {
 
 // MarkDispatched 实例派发成功:置 waiting_receive + 绑定承接 worker + start_time。
 //
-// 终态守护:若 worker 已在 /run 期间(同步)回报了终态(success/failed),则不覆盖回 waiting_receive。
-// worker_address / start_time 仍始终记录(审计),仅 status 受守护。
-func (s InstanceStore) MarkDispatched(id int64, workerAddress string) error {
+// 终态守护:若实例已被并发置终态(stop/cancel 或 worker /run 回报终态),则不覆盖回 waiting_receive,
+// 仅 status 受守护——worker_address/start_time 仍由第一条 UPDATE 无条件写入(审计"曾尝试派发")。
+// 返回 RowsAffected:rows>0 表示 status 真改(未终态,worker 真承接);rows==0 表示已被并发置终态(守护未改),
+// 调用方(dispatchToWorker)据此判断是否继续 Send。
+//
+// rows==0 的字段残留:此时 worker_address/start_time 已写入,但本次派发实际未送达(Send 不发生),
+// 该终态实例会在 UI 上显示一个从未承接它的 worker 地址。属可接受的审计残留(不影响执行:终态不被 Send);
+// 前端无法精确区分"真派发后置终态"与"未派发即置终态",故未在展示层特殊处理。
+func (s InstanceStore) MarkDispatched(id int64, workerAddress string) (int64, error) {
 	if err := s.db.Model(&domain.Instance{}).Where("id = ?", id).Updates(map[string]any{
 		"worker_address": workerAddress,
 		"start_time":     time.Now(),
 	}).Error; err != nil {
-		return err
+		return 0, err
 	}
-	return s.db.Model(&domain.Instance{}).
+	res := s.db.Model(&domain.Instance{}).
 		Where("id = ? AND status NOT IN ?", id, domain.TerminalStatuses()).
-		Update("status", domain.StatusWaitingReceive).Error
+		Update("status", domain.StatusWaitingReceive)
+	return res.RowsAffected, res.Error
 }
 
 // InstanceFilter 实例列表过滤。
@@ -232,9 +239,10 @@ func (s InstanceStore) CreateWithCallback(ins *domain.Instance, build func() *do
 }
 
 // MarkDispatchedWithCallback 置 waiting_receive;status 真变化(rows>0)且 cb 非 nil 才插回调。
+// rows==0(终态守护)时不插回调;worker_address/start_time 残留语义同 MarkDispatched。
 func (s InstanceStore) MarkDispatchedWithCallback(id int64, workerAddress string, cb *domain.Callback) (int64, error) {
 	if cb == nil {
-		return 0, s.MarkDispatched(id, workerAddress) // 无回调走原路径,免事务开销
+		return s.MarkDispatched(id, workerAddress) // 无回调走原路径,免事务开销(返回真实 rows)
 	}
 	var rows int64
 	err := s.db.Transaction(func(tx *gorm.DB) error {

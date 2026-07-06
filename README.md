@@ -100,6 +100,19 @@ worker 启动 → 心跳 {appName, workerAddress, systemMetrics, tags} (无 toke
 | `run_at` | RFC3339 一次性 |
 | `api` | —(仅 API/手动触发) |
 
+### 实例状态变更回调
+
+Job 配 `callback_url` 时,实例每次状态变化(派发 / 运行 / 终态 / 重试)由 `CallbackPump` POST 通知对端,
+payload 为事件瞬间快照。投递语义为**至少一次**(at-least-once):
+
+- 失败指数退避重试(`backoff_base_sec` → `backoff_max_sec`),达 `max_attempts` 仍不成功置 `dead`。
+- **接收方必须幂等**:对端已返回 2xx 但本地记账(`MarkSent`)因 DB 瞬时故障失败时,pump 会退避后重投,
+  同一事件可能被投递多次。用请求头 `X-TaskSchedule-Event-ID`(`cb-<callbackId>`)去重。
+- 极端情况(DB 持续故障)下,一个实际已送达的事件可能重投至上限被标 `dead`——`dead` 表示"本地放弃投递",
+  不等同于"对端从未收到",排查需结合对端日志。
+- SSRF 防御复用 `worker.allowed_cidrs`;未配则回调目标不限制(启动时 Warn,生产应显式配置)。
+- `retention_days` 控制已终态(`sent` / `dead`)回调记录的保留期,超期自动清理;`pending` 永不删(未投递保证)。
+
 ## 鉴权
 
 **管理员账户**(配置注入,不入库):`config.yaml` 的 `auth.admins` 或环境变量

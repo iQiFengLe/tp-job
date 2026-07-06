@@ -3,6 +3,7 @@
 /task-schedule.exe
 /task-schedule-linux-*
 *.exe
+*.exe~
 /web/dist/
 /web/node_modules/
 *.tsbuildinfo
@@ -19,6 +20,9 @@
 # 本地配置/输出
 server.out
 *.local.yaml
+
+# 根目录调试截图(不影响子目录与已跟踪文件)
+/*.png
 
 # IDE
 /.idea/

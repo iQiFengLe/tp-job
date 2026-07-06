@@ -201,6 +201,7 @@ func (p *CallbackPump) sweepLoop(ctx context.Context) {
 		interval = time.Hour
 	}
 	p.log.Info("callback 清理循环启动", "retention", p.retention, "interval", interval)
+	p.purgeOnce() // 启动即首扫,避免过期记录最长等一个 interval 才清
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -209,15 +210,20 @@ func (p *CallbackPump) sweepLoop(ctx context.Context) {
 			p.log.Info("callback 清理循环停止")
 			return
 		case <-t.C:
-			n, err := p.store.Callback.PurgeOld(time.Now().Add(-p.retention))
-			if err != nil {
-				p.log.Error("callback 清理失败", "err", err)
-				continue
-			}
-			if n > 0 {
-				p.log.Info("callback 清理", "purged", n)
-			}
+			p.purgeOnce()
 		}
+	}
+}
+
+// purgeOnce 执行一次清理并记录结果。
+func (p *CallbackPump) purgeOnce() {
+	n, err := p.store.Callback.PurgeOld(time.Now().Add(-p.retention))
+	if err != nil {
+		p.log.Error("callback 清理失败", "err", err)
+		return
+	}
+	if n > 0 {
+		p.log.Info("callback 清理", "purged", n)
 	}
 }
 
@@ -246,8 +252,14 @@ func (p *CallbackPump) once(ctx context.Context) {
 		cb := list[i]
 		if err := p.send(ctx, &cb); err != nil {
 			p.handleFail(&cb, err)
-		} else if err := p.store.Callback.MarkSent(cb.ID); err != nil {
-			p.log.Error("callback MarkSent 失败", "id", cb.ID, "err", err)
+			continue
+		}
+		// send 已成功(对端收到)。MarkSent 失败(DB 瞬时不可用)时不能只记日志——否则 cb 仍 pending
+		// 且 next_retry_at 未推进,下轮 ListDue 立即重投,attempt 永不增长,无 MaxAttempts 上限保护。
+		// 改为走 handleFail 推进退避(下次重投),让 attempt 增长受上限约束,避免 DB 抖动下无限重投。
+		if err := p.store.Callback.MarkSent(cb.ID); err != nil {
+			p.log.Warn("callback MarkSent 记账失败,转入退避重投", "id", cb.ID, "err", err)
+			p.handleFail(&cb, fmt.Errorf("MarkSent 记账失败: %w", err))
 		}
 	}
 }
@@ -268,7 +280,7 @@ func (p *CallbackPump) send(ctx context.Context, cb *domain.Callback) error {
 		return err
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20)) // 释放连接,上限 1MB 防巨幅响应体耗内存
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("callback 非 2xx: %d", resp.StatusCode)
 	}

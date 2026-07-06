@@ -512,3 +512,67 @@ func TestSchedulerWindowEndPast(t *testing.T) {
 		t.Fatalf("end 后不应创建实例, got %d", len(list))
 	}
 }
+
+// dispatchToWorker 派发竞态:Get 时非终态,但 MarkDispatched 前实例被并发 stop/cancel 置终态 →
+// 终态守护 rows==0。此时应中止派发(不 Send,避免业务执行已停止的实例)、不 failDispatch/scheduleRetry
+// (不把终态实例拉进重试链),仅记日志 + 释放飞行槽。回归:原实现忽略 rows,rows==0 时仍 Send。
+// 与 TestCancelDelayedNotDispatched 的区别:后者覆盖"Get 时已终态"(延迟入队期间 cancel);
+// 本测试覆盖更窄的"Get 后、MarkDispatched 前"窗口,即 rows==0 分支本身。
+func TestDispatchAbortsOnConcurrentTerminal(t *testing.T) {
+	st := newTestStore(t)
+	var mu sync.Mutex
+	hits := 0
+	mw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		w.WriteHeader(200)
+	}))
+	defer mw.Close()
+
+	reg := workerreg.New(time.Minute, nil)
+	reg.Heartbeat(workerreg.WorkerInfo{
+		AppID: 1, WorkerAddress: mw.Listener.Addr().String(),
+		Metrics: domain.SystemMetrics{Score: 1}, Protocol: workerreg.ProtocolHTTP, AcceptNotTagJob: true,
+	})
+	il := instancelog.New(t.TempDir(), 0)
+	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog(), NoopCallbackBuilder{})
+
+	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
+	job := &domain.Job{AppID: 1, Name: "j", ExecuteType: "http", JobParams: "p",
+		ScheduleKind: "cron", ScheduleExpr: "*/1 * * * *"}
+	if err := st.Job.Create(job); err != nil {
+		t.Fatal(err)
+	}
+	ins := &domain.Instance{AppID: 1, JobID: job.ID, Status: domain.StatusQueued, TriggerType: "manual"}
+	if err := st.Instance.Create(ins); err != nil {
+		t.Fatal(err)
+	}
+	// 并发:派发前实例已被置终态 stopped(MarkDispatched 终态守护将返回 rows=0)
+	if err := st.Instance.SetStatus(ins.ID, domain.StatusStopped, "并发停止"); err != nil {
+		t.Fatal(err)
+	}
+	sch.bindHeld(ins.ID, job.ID) // 模拟 runManualHeld/retryInstance 派发前的前置绑定
+
+	failed := sch.dispatchToWorker(context.Background(), job, ins, "测试")
+
+	if !failed {
+		t.Error("rows==0(终态守护)应中止并返回 failed=true")
+	}
+	mu.Lock()
+	gotHits := hits
+	mu.Unlock()
+	if gotHits != 0 {
+		t.Errorf("终态实例不应 Send 给 worker, 实际收到 %d 次", gotHits)
+	}
+	got, err := st.Instance.Get(ins.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != domain.StatusStopped {
+		t.Errorf("实例应保持 stopped, got %s", got.Status)
+	}
+	if got.NextRetryTime != nil {
+		t.Errorf("终态实例不应 scheduleRetry, next_retry_time 应为 nil, got %v", got.NextRetryTime)
+	}
+}

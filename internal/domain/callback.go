@@ -22,12 +22,12 @@ type Callback struct {
 	Payload     string `gorm:"type:text" json:"payload"`             // 预序列化 JSON,事件瞬间快照
 
 	Attempt   int        `gorm:"default:0" json:"attempt"`                                              // 已尝试投递次数
-	State     string     `gorm:"type:varchar(8);default:pending;index:idx_cb_due,priority:1" json:"state"` // pending|sent|dead
+	State     string     `gorm:"type:varchar(8);default:pending;index:idx_cb_due,priority:1;index:idx_cb_purge,priority:1" json:"state"` // pending|sent|dead
 	NextRetryAt *time.Time `gorm:"index:idx_cb_due,priority:2" json:"next_retry_at,omitempty"`            // pump:state=pending 且 <=now
 	LastError string     `gorm:"type:text" json:"last_error,omitempty"`
 
 	CreatedAt time.Time `gorm:"autoCreateTime" json:"created_at"`
-	UpdatedAt time.Time `gorm:"autoUpdateTime" json:"updated_at"`
+	UpdatedAt time.Time `gorm:"autoUpdateTime;index:idx_cb_purge,priority:2" json:"updated_at"`
 }
 
 func (Callback) TableName() string { return "instance_callback" }

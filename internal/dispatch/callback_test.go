@@ -112,3 +112,51 @@ func TestCallbackSendNon2xx(t *testing.T) {
 		t.Error("500 应判失败")
 	}
 }
+
+// send 成功但 MarkSent 记账失败(DB 瞬时故障)→ 应转 handleFail 推进退避(attempt 增长、next_retry_at
+// 推进),受 MaxAttempts 上限保护;而非停留 attempt=0/pending/next_retry_at<=now 导致下轮立即重投、
+// 永不触达上限。回归:原实现 MarkSent 失败仅记 Error 日志。
+// 故障注入:sqlite 触发器,UPDATE 到 state=sent 时 RAISE(FAIL),精确模拟 MarkSent 失败
+// (ListDue 是 SELECT、Create 是 INSERT、MarkRetry 不改 state,均不触发,故只让 MarkSent 失败)。
+func TestCallbackMarkSentFailureRetries(t *testing.T) {
+	st := newTestStore(t)
+	if err := st.DB.Exec(`CREATE TRIGGER fail_sent BEFORE UPDATE ON instance_callback
+WHEN NEW.state = 'sent' BEGIN SELECT RAISE(FAIL, 'injected marksent failure'); END`).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200) // send 成功(对端收到)
+	}))
+	defer srv.Close()
+	pol, _ := workerreg.NewAddressPolicy([]string{"127.0.0.0/8"})
+	client := &http.Client{Timeout: 2 * time.Second, Transport: NewSSRFTransport(pol, time.Second)}
+	cfg := config.CallbackCfg{MaxAttempts: 5, BackoffBaseSec: 1, BackoffMaxSec: 10}
+	p := NewCallbackPump(st, client, time.Second, cfg, testLog())
+
+	now := time.Now()
+	cb := &domain.Callback{JobID: 1, AppID: 1, EventStatus: "running", URL: srv.URL, Payload: "{}",
+		State: domain.CallbackPending, NextRetryAt: &now}
+	if err := st.Callback.Create(cb); err != nil {
+		t.Fatal(err)
+	}
+
+	p.once(context.Background()) // send 成功 → MarkSent 失败(触发器)→ 转 handleFail
+
+	var got domain.Callback
+	if err := st.DB.First(&got, cb.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got.Attempt != 1 {
+		t.Errorf("MarkSent 失败应转 handleFail 推进 attempt=1, got %d (修复前:停留 0 无限重投)", got.Attempt)
+	}
+	if got.State != domain.CallbackPending {
+		t.Errorf("应仍 pending 待重投, got %s", got.State)
+	}
+	if got.NextRetryAt == nil || got.NextRetryAt.Before(time.Now()) {
+		t.Error("next_retry_at 应退避到未来,而非停留 now 致下轮立即重投")
+	}
+	if got.LastError == "" {
+		t.Error("last_error 应记录 MarkSent 记账失败原因")
+	}
+}

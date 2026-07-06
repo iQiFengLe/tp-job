@@ -287,6 +287,20 @@ func (d OpenApiDeps) jobBelongToApp(jobID, appID int64) (*domain.Job, error) {
 	return d.Jobs.Get(appID, jobID) // JobStore.Get 带 app_id 过滤
 }
 
+// instanceBelongToApp 越权防护(尽力而为):PowerJob OpenAPI 的 instance 操作客户端传统上只带
+// instanceId(全局唯一)、不带 appId,故此处不强制 appId;仅当请求带了 appId(header/form)时校验
+// 实例归属,不带则放行(对齐 PowerJob,生产隔离靠网络隔离)。返回实例供 fetch* 端点直接复用。
+func (d OpenApiDeps) instanceBelongToApp(c *gin.Context, instanceID int64) (*domain.Instance, error) {
+	ins, err := d.Instances.Get(instanceID)
+	if err != nil {
+		return nil, errors.New("实例不存在")
+	}
+	if appID := appIDFrom(c, nil); appID > 0 && ins.AppID != appID {
+		return nil, errors.New("实例不属于该 app")
+	}
+	return ins, nil
+}
+
 // ===== App =====
 
 // assertApp POST /openApi/assert(appName[,password]) → ResultDTO<Long>(appId)。对齐 PowerJob assertAppName。
@@ -337,6 +351,9 @@ func (d OpenApiDeps) queryJob(c *gin.Context) {
 	var q JobInfoQuery
 	_ = c.ShouldBindJSON(&q)
 	db := d.Store.DB.Model(&domain.Job{})
+	if appID := appIDFrom(c, nil); appID > 0 { // 尽力而为:客户端带 appId 才过滤(对齐 queryInstance)
+		db = db.Where("app_id = ?", appID)
+	}
 	if q.IDEq != nil {
 		db = db.Where("id = ?", *q.IDEq)
 	}
@@ -584,25 +601,30 @@ func (d OpenApiDeps) runJob2(c *gin.Context) {
 // ===== Instance =====
 
 func (d OpenApiDeps) fetchInstanceStatus(c *gin.Context) {
-	ins, err := d.Instances.Get(formInt64(c, "instanceId"))
+	ins, err := d.instanceBelongToApp(c, formInt64(c, "instanceId"))
 	if err != nil {
-		c.JSON(http.StatusOK, ResultFail("实例不存在"))
+		c.JSON(http.StatusOK, ResultFail(err.Error()))
 		return
 	}
 	c.JSON(http.StatusOK, ResultOK(DomainToWire(ins.Status)))
 }
 
 func (d OpenApiDeps) fetchInstanceInfo(c *gin.Context) {
-	ins, err := d.Instances.Get(formInt64(c, "instanceId"))
+	ins, err := d.instanceBelongToApp(c, formInt64(c, "instanceId"))
 	if err != nil {
-		c.JSON(http.StatusOK, ResultFail("实例不存在"))
+		c.JSON(http.StatusOK, ResultFail(err.Error()))
 		return
 	}
 	c.JSON(http.StatusOK, ResultOK(instanceToDTO(ins)))
 }
 
 func (d OpenApiDeps) stopInstance(c *gin.Context) {
-	if err := d.Instances.Stop(formInt64(c, "instanceId")); err != nil {
+	ins, err := d.instanceBelongToApp(c, formInt64(c, "instanceId"))
+	if err != nil {
+		c.JSON(http.StatusOK, ResultFail(err.Error()))
+		return
+	}
+	if err := d.Instances.Stop(ins.ID); err != nil {
 		c.JSON(http.StatusOK, ResultFail(err.Error()))
 		return
 	}
@@ -610,7 +632,12 @@ func (d OpenApiDeps) stopInstance(c *gin.Context) {
 }
 
 func (d OpenApiDeps) cancelInstance(c *gin.Context) {
-	if err := d.Instances.Cancel(formInt64(c, "instanceId")); err != nil {
+	ins, err := d.instanceBelongToApp(c, formInt64(c, "instanceId"))
+	if err != nil {
+		c.JSON(http.StatusOK, ResultFail(err.Error()))
+		return
+	}
+	if err := d.Instances.Cancel(ins.ID); err != nil {
 		c.JSON(http.StatusOK, ResultFail(err.Error()))
 		return
 	}
@@ -618,7 +645,12 @@ func (d OpenApiDeps) cancelInstance(c *gin.Context) {
 }
 
 func (d OpenApiDeps) retryInstance(c *gin.Context) {
-	if err := d.Instances.Retry(formInt64(c, "instanceId")); err != nil {
+	ins, err := d.instanceBelongToApp(c, formInt64(c, "instanceId"))
+	if err != nil {
+		c.JSON(http.StatusOK, ResultFail(err.Error()))
+		return
+	}
+	if err := d.Instances.Retry(ins.ID); err != nil {
 		c.JSON(http.StatusOK, ResultFail(err.Error()))
 		return
 	}

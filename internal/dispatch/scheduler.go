@@ -775,9 +775,19 @@ func (s *Scheduler) dispatchToWorker(ctx context.Context, job *domain.Job, ins *
 		return true
 	}
 	ins.WorkerAddress = addr // payload 快照用(DB 由 MarkDispatched 写)
-	if _, err := s.store.Instance.MarkDispatchedWithCallback(ins.ID, addr, s.cbBuilder.Build(ins, job, domain.StatusWaitingReceive)); err != nil {
+	rows, err := s.store.Instance.MarkDispatchedWithCallback(ins.ID, addr, s.cbBuilder.Build(ins, job, domain.StatusWaitingReceive))
+	if err != nil {
 		s.log.Error("标记派发失败", "instance_id", ins.ID, "err", err)
 		s.failDispatch(ins, job, prefix, "绑定 worker 失败: "+err.Error())
+		return true
+	}
+	if rows == 0 {
+		// 终态守护触发:实例在 Get 后被并发 stop/cancel 写终态,MarkDispatched 未改 status。
+		// 此时不可 Send(否则 worker 会执行一个已被停止的实例),也不可 failDispatch/scheduleRetry
+		// (会把已终态实例重新拉进重试链)。仅释放本次派发占用的飞行槽并记日志后中止。
+		s.log.Warn(prefix+"中止:实例已被并发置终态", "instance_id", ins.ID)
+		s.appendLogRaw(ins, "STATUS", "warn", prefix+"中止:实例已被并发置终态")
+		s.releaseByInstance(ins.ID)
 		return true
 	}
 	s.appendLogRaw(ins, "DISPATCH", "info", prefix+"到 worker "+addr)
