@@ -240,18 +240,15 @@ func main() {
 
 	// 先停 HTTP(拒新请求、处理完在飞 handler),再等后台 goroutine 退出,最后关 DB——避免后台/reaper
 	// 仍在写库时 Close DB 造成竞态。sch.Wait 等调度循环 + 派发子协程;bg 等注册表/会话/日志清理循环。
-	// 各给 10s 超时,防某轮 runOnce 卡住拖死关闭进程(最坏丢极少量在飞写库,优于永久挂起)。
-	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// 关闭总预算 30s:须 > 派发 POST 超时(10s)+ callback POST 超时(默认 10s)+ DB 提交余量,
+	// 确保 in-flight 派发/回调能在关闭前完成或超时回收,避免强杀在飞写库(原 10s 与 POST 超时同值,
+	// 慢 DB/网络下卡边界)。httpSrv.Shutdown 与三类协程等待共用此预算——单一 deadline 而非各自独立
+	// 超时串行累加(快的先过,慢的吃剩余,总时长封顶 30s)。
+	const shutdownTimeout = 30 * time.Second
+	shutCtx, shutCancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer shutCancel()
 	if err := httpSrv.Shutdown(shutCtx); err != nil {
 		log.Error("HTTP 关闭失败", "err", err)
-	}
-	waitWithTimeout := func(done <-chan struct{}, name string) {
-		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
-			log.Warn(name+" 10s 内未全部退出,继续关闭", "wait", name)
-		}
 	}
 	schDone, bgDone, cbDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	go func() { sch.Wait(); close(schDone) }()
@@ -262,9 +259,27 @@ func main() {
 		}
 		close(cbDone)
 	}()
-	waitWithTimeout(schDone, "调度协程")
-	waitWithTimeout(bgDone, "后台清理协程")
-	waitWithTimeout(cbDone, "回调 pump")
+	deadline := time.Now().Add(shutdownTimeout)
+	for _, w := range []struct {
+		name string
+		done <-chan struct{}
+	}{
+		{"调度协程", schDone},
+		{"后台清理协程", bgDone},
+		{"回调 pump", cbDone},
+	} {
+		if remaining := time.Until(deadline); remaining > 0 {
+			t := time.NewTimer(remaining)
+			select {
+			case <-w.done:
+				t.Stop()
+			case <-t.C:
+				log.Warn("关闭预算内未退出,继续关闭", "wait", w.name, "budget", shutdownTimeout)
+			}
+		} else {
+			log.Warn("关闭预算耗尽,部分协程仍运行,继续关闭", "wait", w.name, "budget", shutdownTimeout)
+		}
+	}
 	if sqlDB, err := st.DB.DB(); err == nil {
 		_ = sqlDB.Close()
 	}
