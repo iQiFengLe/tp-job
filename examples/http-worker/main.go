@@ -54,7 +54,7 @@ func main() {
 	// 2. 本地 HTTP 服务:接收 /run 派发
 	mux := http.NewServeMux()
 	mux.HandleFunc("/run", func(w http.ResponseWriter, r *http.Request) {
-		runHandler(*server, w, r)
+		runHandler(*server, workerAddr, w, r)
 	})
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprintln(w, "ok") })
 
@@ -67,7 +67,7 @@ func main() {
 //
 // 立即 ACK 是关键:服务端 POST /run 仅交付任务(2xx=已接收),worker 异步执行后回调上报终态。
 // 若在返回 2xx 前就同步上报终态,会与"派发→waiting_receive"竞态(已被终态守护兜住,但应避免)。
-func runHandler(server string, w http.ResponseWriter, r *http.Request) {
+func runHandler(server, workerAddr string, w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		JobParams         string `json:"jobParams"`
 		JobInstanceParams string `json:"jobInstanceParams"`
@@ -92,8 +92,9 @@ func runHandler(server string, w http.ResponseWriter, r *http.Request) {
 			"time":    time.Now().UnixMilli(),
 		})
 		postJSON(server+"/worker/instances/"+fmt.Sprint(body.JobInstanceID)+"/status", map[string]any{
-			"status": "success", // 终态:waiting_receive → success
-			"result": result,
+			"workerAddress": workerAddr, // 归属校验:须与实例绑定的 worker 一致(B2)
+			"status":        "success",  // 终态:waiting_receive → success
+			"result":        result,
 		})
 	}()
 }

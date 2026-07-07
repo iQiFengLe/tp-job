@@ -93,26 +93,52 @@ func TestHeartbeatUnknownApp(t *testing.T) {
 	}
 }
 
-// 回报 status:running→success;终态后迟到 failed 不覆盖。
+// 回报 status:running→success;终态后迟到 failed 不覆盖。上报 worker 须与实例绑定一致(B2)。
 func TestReportStatus(t *testing.T) {
 	d, st, _ := newDeps(t)
 	d.Apps.Create("a", "p", 0)
-	ins := &domain.Instance{JobID: 1, AppID: 1, Status: domain.StatusRunning}
+	ins := &domain.Instance{JobID: 1, AppID: 1, Status: domain.StatusRunning, WorkerAddress: "1.2.3.4:9000"}
 	_ = st.Instance.Create(ins)
 
 	g := gin.New()
 	Register(g.Group("/worker"), d)
 
-	postJSON(t, g, "/worker/instances/"+itoa(ins.ID)+"/status", ReportStatusReq{Status: domain.StatusSuccess, Result: "ok"})
+	postJSON(t, g, "/worker/instances/"+itoa(ins.ID)+"/status", ReportStatusReq{WorkerAddress: "1.2.3.4:9000", Status: domain.StatusSuccess, Result: "ok"})
 	got, _ := st.Instance.Get(ins.ID)
 	if got.Status != domain.StatusSuccess {
 		t.Fatalf("应为 success, got %s", got.Status)
 	}
-	// 迟到 failed
-	postJSON(t, g, "/worker/instances/"+itoa(ins.ID)+"/status", ReportStatusReq{Status: domain.StatusFailed})
+	// 迟到 failed(同 worker)
+	postJSON(t, g, "/worker/instances/"+itoa(ins.ID)+"/status", ReportStatusReq{WorkerAddress: "1.2.3.4:9000", Status: domain.StatusFailed})
 	got, _ = st.Instance.Get(ins.ID)
 	if got.Status != domain.StatusSuccess {
 		t.Fatalf("终态守护应拒绝覆盖, got %s", got.Status)
+	}
+}
+
+// 归属校验:上报 worker 与实例绑定不一致 / 缺失 → 403,防伪造 id 篡改他人实例状态(B2)。
+func TestReportStatusWorkerMismatch(t *testing.T) {
+	d, st, _ := newDeps(t)
+	d.Apps.Create("a", "p", 0)
+	ins := &domain.Instance{JobID: 1, AppID: 1, Status: domain.StatusRunning, WorkerAddress: "real:9000"}
+	_ = st.Instance.Create(ins)
+
+	g := gin.New()
+	Register(g.Group("/worker"), d)
+
+	// 假 worker 冒充回报 → 403,状态不变
+	resp := postJSON(t, g, "/worker/instances/"+itoa(ins.ID)+"/status", ReportStatusReq{WorkerAddress: "spoof:9000", Status: domain.StatusSuccess})
+	if resp.Code != http.StatusForbidden {
+		t.Fatalf("worker 不匹配应 403, got %d", resp.Code)
+	}
+	got, _ := st.Instance.Get(ins.ID)
+	if got.Status != domain.StatusRunning {
+		t.Fatalf("不匹配回报应被拒,状态不变, got %s", got.Status)
+	}
+	// 缺 workerAddress 同样拒绝
+	resp2 := postJSON(t, g, "/worker/instances/"+itoa(ins.ID)+"/status", ReportStatusReq{Status: domain.StatusSuccess})
+	if resp2.Code != http.StatusForbidden {
+		t.Fatalf("缺 workerAddress 应 403, got %d", resp2.Code)
 	}
 }
 

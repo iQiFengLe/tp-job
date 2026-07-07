@@ -19,9 +19,11 @@ type HeartbeatReq struct {
 }
 
 // ReportStatusReq worker 回报实例状态(领域 string 状态码)。
+// WorkerAddress 为上报者自报地址,须与实例绑定的 worker_address 一致(归属校验,防伪造 id 篡改他人实例)。
 type ReportStatusReq struct {
-	Status string `json:"status"`
-	Result string `json:"result"`
+	WorkerAddress string `json:"workerAddress"`
+	Status        string `json:"status"`
+	Result        string `json:"result"`
 }
 
 // ReportLogReq worker 上报一条执行日志。

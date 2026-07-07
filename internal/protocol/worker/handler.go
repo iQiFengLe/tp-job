@@ -70,6 +70,17 @@ func (d Deps) reportStatus(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "参数错误: "+err.Error())
 		return
 	}
+	// 归属校验:上报 worker 须与实例绑定的 worker_address 一致,防伪造实例 id 篡改他人实例状态
+	// (iid 自增可枚举;/worker/* 无鉴权,根本防护靠网络隔离,此处为纵深防御)。
+	ins, err := d.Instances.Get(iid)
+	if err != nil {
+		fail(c, http.StatusNotFound, err.Error())
+		return
+	}
+	if ins.WorkerAddress == "" || req.WorkerAddress != ins.WorkerAddress {
+		fail(c, http.StatusForbidden, "worker 与实例绑定不一致,拒绝状态上报")
+		return
+	}
 	if err := d.Instances.ReportStatus(iid, req.Status, req.Result); err != nil {
 		fail(c, http.StatusBadRequest, err.Error())
 		return

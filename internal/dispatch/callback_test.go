@@ -161,6 +161,38 @@ WHEN NEW.state = 'sent' BEGIN SELECT RAISE(FAIL, 'injected marksent failure'); E
 	// 核心保证已在上面三项:attempt 推进 + 仍 pending + next_retry_at 退避到未来 → 下轮重投 attempt 受上限约束。
 }
 
+// send 成功 + 本次 attempt 达 maxAtt → markProgress MarkDead 并返回 true,once 据此跳过 MarkSent,
+// 最终 state=dead。修复前:once 无条件 MarkSent(WHERE 仅 id=?),把刚写的 dead 改回 sent,
+// 使"已达上限放弃投递"的记录被误标投递成功,B1。
+func TestCallbackSendSuccessMaxAttDead(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200) // send 成功(对端收到)
+	}))
+	defer srv.Close()
+	pol, _ := workerreg.NewAddressPolicy([]string{"127.0.0.0/8"})
+	client := &http.Client{Timeout: 2 * time.Second, Transport: NewSSRFTransport(pol, time.Second)}
+	st := newTestStore(t)
+	cfg := config.CallbackCfg{MaxAttempts: 2, BackoffBaseSec: 1, BackoffMaxSec: 10}
+	p := NewCallbackPump(st, client, time.Second, cfg, testLog())
+
+	now := time.Now()
+	cb := &domain.Callback{JobID: 1, AppID: 1, EventStatus: "running", URL: srv.URL, Payload: "{}",
+		State: domain.CallbackPending, NextRetryAt: &now, Attempt: 1} // attempt+1=2 >= MaxAttempts=2 → dead
+	if err := st.Callback.Create(cb); err != nil {
+		t.Fatal(err)
+	}
+
+	p.once(context.Background())
+
+	var got domain.Callback
+	if err := st.DB.First(&got, cb.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got.State != domain.CallbackDead {
+		t.Errorf("send 成功 + 达 maxAtt 应终止为 dead(不被 MarkSent 覆盖), got %s", got.State)
+	}
+}
+
 // *WithCallback 的 build 闭包应拿到 tx 内 UPDATE 后 SELECT 出的最新行(事件瞬间值),
 // 而非 tx 外的读快照——避免并发改 DB 期间 payload stale(TOCTOU)。
 func TestUpdateResultWithCallbackBuildGetsLatest(t *testing.T) {

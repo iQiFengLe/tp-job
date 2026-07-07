@@ -135,7 +135,8 @@ payload 为事件瞬间快照。投递语义为**至少一次**(at-least-once):
 
 - `/worker/*` **简化 http 协议**:心跳 `POST /worker/heartbeat`;派发 `POST /run`
   body `{jobParams, jobInstanceParams, jobId, jobInstanceId}`;回报 `POST /worker/instances/:iid/status`
-  `{status, result}`、`POST /worker/instances/:iid/logs` `{level, message, time}`。状态用领域 string。
+  `{workerAddress, status, result}`(`workerAddress` 须与实例绑定一致,防伪造 id 篡改)、
+  `POST /worker/instances/:iid/logs` `{level, message, time}`。状态用领域 string。
 - `/server/*` **PowerJob 协议**:遵循 PowerJob 协议的自研 http worker 接入(assert/acquire/workerHeartbeat/
   reportInstanceStatus/reportLog),派发用 `runJob`(`ServerScheduleJobReq` 子集),状态用官方数字码。
   不支持官方 Java processor(无 processorInfo 派发),不提供任何语言 SDK。
@@ -178,8 +179,9 @@ CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags="-s -w" -o task-schedu
 ./task-schedule -config config.yaml
 ```
 
-**Docker**:`docker compose up -d`(compose 已注入 release 必填的 `TASK_SCHEDULE_ADMIN_PASSWORD`,
-镜像内 `//go:embed` 前端,健康检查打 `/health`,DB 不可达返回 503 供探针判定)。
+**Docker**:`docker compose up -d`(compose 经 `config.release.yaml` 设 release + 登录限流;镜像内
+`//go:embed` 前端,健康检查打 `/health`,DB 不可达返回 503 供探针判定)。首启种 `admin/admin123`,
+**登录后立即在「账户设置」改密**。
 
 **网络隔离(生产必做)**:用 `deploy/nginx-isolation.conf.example` 前置反代,仅放行可信 worker 网段访问
 `/server/*`、`/worker/*`;`/api/*` 自带登录鉴权可正常暴露。
