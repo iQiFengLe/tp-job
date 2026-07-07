@@ -84,16 +84,6 @@ func main() {
 	}
 
 	reg := workerreg.New(time.Duration(cfg.Worker.TimeoutSeconds)*time.Second, log)
-	var pol *workerreg.AddressPolicy
-	if len(cfg.Worker.AllowedCIDRs) > 0 {
-		var err error
-		pol, err = workerreg.NewAddressPolicy(cfg.Worker.AllowedCIDRs)
-		if err != nil {
-			fail(err)
-		}
-		reg.SetPolicy(pol)
-		log.Info("worker 地址白名单已启用", "cidrs", cfg.Worker.AllowedCIDRs)
-	}
 	il := instancelog.New(cfg.Log.Dir, time.Duration(cfg.Log.InstanceRetentionDays)*24*time.Hour)
 	exec := dispatch.New(reg, 10*time.Second) // 派发 POST 超时(远小于实例执行超时)
 	cbBuilder := dispatch.NewCallbackBuilder(cfg.Scheduler.Callback.Enabled)
@@ -134,14 +124,11 @@ func main() {
 	// 避免关闭期写库与 sqlDB.Close 竞态。
 	sch.Start(ctx, reg)
 
-	// 实例状态变更回调 pump:扫描 pending 回调,经 SSRF 安全的 client POST,至少一次。
-	// transport.DialContext 解析域名逐 IP 校验 pol(防 DNS rebinding);pol=nil 时放行(同 worker 语义)。
+	// 实例状态变更回调 pump:扫描 pending 回调,POST 通知对端,至少一次。
+	// callback URL 可信性靠部署侧网络隔离(同 worker);Transport 仅设连接超时,禁重定向防 302 诱导。
 	var cbPump *dispatch.CallbackPump
 	if cfg.Scheduler.Callback.Enabled {
-		if pol == nil {
-			log.Warn("callback 启用但未配 worker.allowed_cidrs,回调未受 SSRF 保护(任意 callback_url 均放行)")
-		}
-		cbTransport := dispatch.NewSSRFTransport(pol, time.Duration(cfg.Scheduler.Callback.TimeoutSec)*time.Second)
+		cbTransport := dispatch.NewDialTransport(time.Duration(cfg.Scheduler.Callback.TimeoutSec) * time.Second)
 		cbPump = dispatch.NewCallbackPump(st, &http.Client{
 			Timeout:   time.Duration(cfg.Scheduler.Callback.TimeoutSec) * time.Second,
 			Transport: cbTransport,
@@ -150,12 +137,10 @@ func main() {
 		cbPump.Start(ctx)
 	}
 	// PowerJob 同步客户端:作为 OpenAPI 客户端拉取外部 PowerJob server 的任务定义。
-	// ServerAddress 由 admin 显式填写(import-powerjob 仅 admin 可调 + validateAddr 限 scheme),
-	// 与 worker 自上报地址(不可信,仍受 pol 保护)属不同信任类别——故 Transport 用 nil policy
-	// (放行),不绑 worker.allowed_cidrs,避免运维加固 worker 白名单时误伤 PowerJob 拉取。
+	// ServerAddress 由 admin 显式填写(import-powerjob 仅 admin 可调 + validateAddr 限 scheme)。
 	pjClient := powerjob.NewClient(&http.Client{
 		Timeout:   30 * time.Second,
-		Transport: dispatch.NewSSRFTransport(nil, 15*time.Second),
+		Transport: dispatch.NewDialTransport(15 * time.Second),
 	})
 	var bg sync.WaitGroup
 	runBG := func(fn func()) {

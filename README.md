@@ -110,7 +110,7 @@ payload 为事件瞬间快照。投递语义为**至少一次**(at-least-once):
   同一事件可能被投递多次。用请求头 `X-TaskSchedule-Event-ID`(`cb-<callbackId>`)去重。
 - 极端情况(DB 持续故障)下,一个实际已送达的事件可能重投至上限被标 `dead`——`dead` 表示"本地放弃投递",
   不等同于"对端从未收到",排查需结合对端日志。
-- SSRF 防御复用 `worker.allowed_cidrs`;未配则回调目标不限制(启动时 Warn,生产应显式配置)。
+- callback URL 可信性靠部署侧网络隔离(同 /server/*、/worker/*);禁重定向防 302 诱导。
 - `retention_days` 控制已终态(`sent` / `dead`)回调记录的保留期,超期自动清理;`pending` 永不删(未投递保证)。
 
 ## 鉴权
@@ -146,10 +146,6 @@ payload 为事件瞬间快照。投递语义为**至少一次**(at-least-once):
 
 > ⚠ `/server/*`、`/worker/*` 无鉴权:任何人可注册任意 worker 地址 → 到期 job 主动 POST 该地址(SSRF),
 > 可伪造实例状态。**生产必须通过网络隔离保护**(见 `deploy/nginx-isolation.conf.example`),切勿直接暴露公网。
->
-> 可选纵深防御:`worker.allowed_cidrs`(config.yaml)限制可注册的 worker 地址网段(CIDR/IP),
-> 非白名单地址的注册被拒(`worker` 协议返 400,`server` 协议静默不注册)。默认空=不限制;启用后
-> 建议填可信 worker 网段(如 `10.0.0.0/8`)。
 
 示例 worker:`examples/http-worker/` 演示 `/worker/*` 最小接入(心跳 + `/run` 回显 + 异步回报 success)。
 

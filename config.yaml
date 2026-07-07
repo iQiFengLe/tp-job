@@ -28,7 +28,7 @@ log:
 scheduler:
   interval_ms: 1000   # 调度/reaper/retry/callback pump 扫描间隔(毫秒)
   # 实例状态变更回调:Job 配 callback_url 时,实例每次状态变化 POST 通知,至少一次。
-  # SSRF 防御复用 worker.allowed_cidrs(未配则 callback 目标不限制,启动时 Warn 提示)。
+  # callback URL 可信性靠部署侧网络隔离(同 /server/*、/worker/*);禁重定向防 302 诱导。
   callback:
     enabled: true
     max_attempts: 8
@@ -39,10 +39,6 @@ scheduler:
 
 worker:
   timeout_seconds: 600   # worker 心跳超时(秒),超过视为离线(reaper 据此失败转移)。默认 10 分钟
-  # 可选:worker 地址白名单(CIDR 或单 IP)。空=不限制(默认)。
-  # /server/*、/worker/* 无鉴权,白名单作 SSRF 纵深防御:即便网络隔离失效,非白名单网段的地址
-  # 也无法注册并被派发 POST。生产建议填可信 worker 网段,如:
-  # allowed_cidrs: ["10.0.0.0/8", "192.168.0.0/16"]
 
 powerjob:
   # /server/* 始终挂载(标准 PowerJob Java worker 不改源码接入)。⚠ /server/*、/worker/* 无鉴权,

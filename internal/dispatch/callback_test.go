@@ -10,7 +10,6 @@ import (
 
 	"task-schedule/internal/config"
 	"task-schedule/internal/domain"
-	"task-schedule/internal/workerreg"
 )
 
 func TestBuildCallbackFields(t *testing.T) {
@@ -80,32 +79,11 @@ func TestCallbackHandleFailDead(t *testing.T) {
 	}
 }
 
-// SSRF:白名单只含 10.x,httptest 地址(127.0.0.1)应被 DialContext 拒绝 → send 失败。
-func TestCallbackSendSSRFBlocked(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
-	defer srv.Close()
-	pol, err := workerreg.NewAddressPolicy([]string{"10.0.0.0/8"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client := &http.Client{
-		Timeout:   2 * time.Second,
-		Transport: NewSSRFTransport(pol, time.Second),
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
-	p := NewCallbackPump(newTestStore(t), client, time.Second, config.CallbackCfg{TimeoutSec: 2}, testLog())
-	cb := &domain.Callback{URL: srv.URL, Payload: "{}"}
-	if err := p.send(context.Background(), cb); err == nil {
-		t.Error("白名单外的 127.0.0.1 应被 SSRF 拦截,期望 send 失败")
-	}
-}
-
 // 非 2xx → send 失败(触发 pump 重试)。
 func TestCallbackSendNon2xx(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) }))
 	defer srv.Close()
-	pol, _ := workerreg.NewAddressPolicy([]string{"127.0.0.0/8"})
-	client := &http.Client{Timeout: 2 * time.Second, Transport: NewSSRFTransport(pol, time.Second)}
+	client := &http.Client{Timeout: 2 * time.Second, Transport: NewDialTransport(time.Second)}
 	p := NewCallbackPump(newTestStore(t), client, time.Second, config.CallbackCfg{TimeoutSec: 2}, testLog())
 	cb := &domain.Callback{URL: srv.URL, Payload: "{}"}
 	if err := p.send(context.Background(), cb); err == nil {
@@ -130,8 +108,7 @@ WHEN NEW.state = 'sent' BEGIN SELECT RAISE(FAIL, 'injected marksent failure'); E
 		w.WriteHeader(200) // send 成功(对端收到)
 	}))
 	defer srv.Close()
-	pol, _ := workerreg.NewAddressPolicy([]string{"127.0.0.0/8"})
-	client := &http.Client{Timeout: 2 * time.Second, Transport: NewSSRFTransport(pol, time.Second)}
+	client := &http.Client{Timeout: 2 * time.Second, Transport: NewDialTransport(time.Second)}
 	cfg := config.CallbackCfg{MaxAttempts: 5, BackoffBaseSec: 1, BackoffMaxSec: 10}
 	p := NewCallbackPump(st, client, time.Second, cfg, testLog())
 
@@ -169,8 +146,7 @@ func TestCallbackSendSuccessMaxAttDead(t *testing.T) {
 		w.WriteHeader(200) // send 成功(对端收到)
 	}))
 	defer srv.Close()
-	pol, _ := workerreg.NewAddressPolicy([]string{"127.0.0.0/8"})
-	client := &http.Client{Timeout: 2 * time.Second, Transport: NewSSRFTransport(pol, time.Second)}
+	client := &http.Client{Timeout: 2 * time.Second, Transport: NewDialTransport(time.Second)}
 	st := newTestStore(t)
 	cfg := config.CallbackCfg{MaxAttempts: 2, BackoffBaseSec: 1, BackoffMaxSec: 10}
 	p := NewCallbackPump(st, client, time.Second, cfg, testLog())

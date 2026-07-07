@@ -39,8 +39,6 @@ scheduler:
 
 worker:
   timeout_seconds: 600
-  # 生产建议填可信 worker 网段(SSRF 纵深防御):如 ["10.0.0.0/8", "192.168.0.0/16"]
-  # allowed_cidrs: ["10.0.0.0/8"]
 
 powerjob:
   # ⚠ 容器化部署必须是 worker 可达地址,绝不能用 127.0.0.1(那是容器自身);如 "task-schedule:8080"

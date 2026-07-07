@@ -16,7 +16,6 @@ import (
 	"task-schedule/internal/config"
 	"task-schedule/internal/domain"
 	"task-schedule/internal/repository"
-	"task-schedule/internal/workerreg"
 )
 
 // ===== CallbackBuilder(装配层注入,scheduler/dservice 在状态变更点调用) =====
@@ -122,33 +121,15 @@ func BuildCallback(ins *domain.Instance, job *domain.Job, eventStatus, callbackU
 	}
 }
 
-// ===== SSRF 安全的 HTTP Transport =====
+// ===== HTTP Transport =====
 
-// NewSSRFTransport 构造防 SSRF 的 http.Transport:连接期解析域名,逐 IP 用 policy 校验,
-// 仅连白名单 IP(防 DNS rebinding)。policy=nil 时不限制(与 workerreg 语义一致)。
-func NewSSRFTransport(policy *workerreg.AddressPolicy, dialTimeout time.Duration) *http.Transport {
+// NewDialTransport 构造带连接超时的 http.Transport(callback POST / PowerJob 客户端用)。
+// worker 地址与 callback URL 的可信性由部署侧网络隔离保证(/server/*、/worker/* 无鉴权),
+// 此处仅设连接超时,不做来源限制。
+func NewDialTransport(dialTimeout time.Duration) *http.Transport {
 	dialer := &net.Dialer{Timeout: dialTimeout}
 	return &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			host, port, err := net.SplitHostPort(addr)
-			if err != nil {
-				return nil, err
-			}
-			if policy == nil {
-				return dialer.DialContext(ctx, network, addr)
-			}
-			ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-			if err != nil {
-				return nil, fmt.Errorf("callback SSRF: 解析 %s 失败: %w", host, err)
-			}
-			for _, ip := range ips {
-				if !policy.Allowed(ip.IP.String()) {
-					continue
-				}
-				return dialer.DialContext(ctx, network, net.JoinHostPort(ip.IP.String(), port))
-			}
-			return nil, fmt.Errorf("callback SSRF: %s 解析出的 IP 均不在白名单", host)
-		},
+		DialContext: dialer.DialContext,
 	}
 }
 
@@ -169,7 +150,7 @@ type CallbackPump struct {
 	wg        sync.WaitGroup
 }
 
-// NewCallbackPump 构造。client 应使用 NewSSRFTransport + 禁重定向(CheckRedirect)。
+// NewCallbackPump 构造。client 应使用 NewDialTransport + 禁重定向(CheckRedirect)。
 // retention 从 cfg.RetentionDays 派生(<=0 不启用清理)。
 func NewCallbackPump(st *repository.Store, client *http.Client, interval time.Duration, cfg config.CallbackCfg, log *slog.Logger) *CallbackPump {
 	return &CallbackPump{

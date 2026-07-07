@@ -44,10 +44,6 @@ func (d Deps) heartbeat(c *gin.Context) {
 		fail(c, http.StatusNotFound, "app("+req.AppName+")未注册")
 		return
 	}
-	if !d.Reg.AllowedAddress(req.WorkerAddress) {
-		fail(c, http.StatusBadRequest, "worker 地址不在允许网段(配置 worker.allowed_cidrs)")
-		return
-	}
 	proto := req.Protocol
 	if proto == "" {
 		proto = workerreg.ProtocolHTTP

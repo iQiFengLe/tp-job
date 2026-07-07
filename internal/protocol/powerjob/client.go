@@ -15,12 +15,12 @@ import (
 // Client 是 PowerJob OpenAPI 的只读客户端,用于从外部 PowerJob server 同步任务定义。
 // 与本包 server 兼容层(/openApi/*)方向相反:此处本服务作为客户端去连真正的 PowerJob。
 //
-// http.Client 应注入 SSRF 安全的 Transport(见 dispatch.NewSSRFTransport),由调用方装配。
+// http.Client 应注入带连接超时的 Transport(见 dispatch.NewDialTransport),由调用方装配。
 type Client struct {
 	http *http.Client
 }
 
-// NewClient 构造客户端;h 为 nil 时用 http.DefaultClient(不建议生产用,失去 SSRF 防护)。
+// NewClient 构造客户端;h 为 nil 时用 http.DefaultClient(不建议生产用,失去连接超时控制)。
 func NewClient(h *http.Client) *Client {
 	if h == nil {
 		h = http.DefaultClient

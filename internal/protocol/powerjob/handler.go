@@ -67,10 +67,6 @@ func (d Deps) workerHeartbeat(c *gin.Context) {
 		c.Status(http.StatusOK) // 容错:未知 app 静默,避免 worker 反压
 		return
 	}
-	if !d.Reg.AllowedAddress(req.WorkerAddress) {
-		c.Status(http.StatusOK) // 容错:非白名单静默不注册(对齐 PowerJob 不反压)
-		return
-	}
 	tags := req.Tags
 	if len(tags) == 0 && req.Tag != "" {
 		tags = []string{req.Tag}
