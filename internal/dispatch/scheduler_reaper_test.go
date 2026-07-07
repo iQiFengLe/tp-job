@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -216,6 +217,50 @@ func TestReaperWarmupSkipsWorkerOffline(t *testing.T) {
 	sch.reapOnce(reg)
 	if got, _ := st.Instance.Get(ins.ID); got.Status != domain.StatusFailed {
 		t.Fatalf("warmup 关闭后应判 worker 失联 → failed, got %s", got.Status)
+	}
+}
+
+// TestReaperExecutionTimeout 验证 reaper 把"在线 worker 上执行超 job.TimeoutSec"的实例标 timeout
+// (区别于 worker 失联/未绑定 → failed),且配了 RetryCount 时设 next_retry_time 可重试。
+func TestReaperExecutionTimeout(t *testing.T) {
+	st := newTestStore(t)
+	reg := workerreg.New(time.Minute, nil)
+	il := instancelog.New(t.TempDir(), 0)
+	exec := &fakeExecutor{pick: true}
+	sch := NewScheduler(st, exec, il, 50*time.Millisecond, testLog(), NoopCallbackBuilder{})
+
+	app := &domain.App{AppName: "t", Password: "p"}
+	_ = st.App.Create(app)
+	// TimeoutSec=2 + RetryCount=1:在线 worker 上跑超时应转 timeout 且可重试
+	job := &domain.Job{AppID: app.ID, Name: "j", ExecuteType: "http", TimeoutSec: 2, RetryCount: 1, RetryIntervalSec: 1}
+	_ = st.Job.Create(job)
+
+	// 注册在线 worker(reaper 不判失联,从而落到 TimeoutSec 判定)
+	reg.Heartbeat(workerreg.WorkerInfo{AppID: app.ID, WorkerAddress: "10.0.0.1:9000"})
+
+	// 实例已派发、绑定在线 worker,StartTime 早于 now-TimeoutSec(已超时)
+	stime := time.Now().Add(-10 * time.Second)
+	ins := &domain.Instance{
+		JobID: job.ID, AppID: app.ID,
+		Status:        domain.StatusRunning,
+		WorkerAddress: "10.0.0.1:9000",
+		TriggerType:   "auto",
+		TriggerTime:   stime,
+		StartTime:     &stime,
+	}
+	_ = st.Instance.Create(ins)
+
+	sch.reapOnce(reg)
+
+	got, _ := st.Instance.Get(ins.ID)
+	if got.Status != domain.StatusTimeout {
+		t.Fatalf("执行超时应→timeout, got %s", got.Status)
+	}
+	if !strings.Contains(got.Result, "执行超时") {
+		t.Errorf("result 应注明执行超时, got %s", got.Result)
+	}
+	if got.NextRetryTime == nil {
+		t.Error("配了 RetryCount 的 timeout 实例应设 next_retry_time(可重试)")
 	}
 }
 

@@ -7,7 +7,7 @@
 
 - **统一执行模型**:服务端选 worker 异步派发,worker 回报。砍掉用户自定义 webhook URL/headers/body。
 - **两种 worker 接入**:`/worker/*`(通用 http,固定 body)/`/server/*`(遵循 PowerJob 协议的自研 http worker)。不支持官方 Java processor,无任何 SDK。
-- **8 态状态机** + **DB 驱动重试**(重启不丢)+ **reaper 失败转移**(worker 失联/超时)。
+- **9 态状态机** + **DB 驱动重试**(重启不丢)+ **reaper 失败转移**(worker 失联/超时)。
 - **实例日志落本地文件**,按 root 实例聚合,呈现一次触发的完整时间线(调度埋点 + worker 上报)。
 - **管理端账户登录**(管理员 admin_user 表 + 应用账户走 app 表)+ 权限矩阵(admin/app 双角色)。
 - int 自增主键 + AppName 全局唯一;PowerJob 兼容(`/server/*` + runJob)与新模型统一收敛。
@@ -65,26 +65,29 @@ worker 启动 → 心跳 {appName, workerAddress, systemMetrics, tags} (无 toke
                   │
 服务端 POST {jobParams, jobInstanceParams, jobId, jobInstanceId} → worker.workerAddress
                   │ (worker ACK 2xx = 已接收)
-实例: queued → dispatched → waiting_receive ──worker回报──→ running ──→ success/failed
+实例: queued → dispatched → waiting_receive ──worker回报──→ running ──→ success/failed/timeout
                   │                                           │
-                  │      worker 失联/执行超时 ──reaper──→ failed │
-                  └──── failed 且未达上限 ──→ next_retry_time ──→ RetryPump 重派
+                  │      worker 失联 ──reaper──→ failed        │
+                  │      执行超时 ──reaper──→ timeout          │
+                  └──── failed/timeout 且未达上限 ──→ next_retry_time ──→ RetryPump 重派
 ```
 
 - **异步派发**:POST 仅交付任务(2xx=已接收),worker 异步执行后回调上报终态。
 - **任务级并发槽**随实例生命周期(派发后绑定,终态/reaper 释放);`MaxConcurrency` 按在飞实例数计。
-- **reaper**:扫 `waiting_receive`/`running`,worker 心跳超时或超 `TimeoutSec` → `failed` + 触发重试。
-- **RetryPump**:扫 `failed` 且 `next_retry_time` 到期,按 `retryIndex+1` 重派(DB 驱动,重启不丢)。
+- **reaper**:扫 `waiting_receive`/`running`,worker 心跳超时 → `failed`;执行超 `TimeoutSec` → `timeout`;均触发重试。
+- **RetryPump**:扫 `failed`/`timeout` 且 `next_retry_time` 到期,按 `retryIndex+1` 重派(DB 驱动,重启不丢)。
 - **at-least-once**:worker 迟到回报可能与重派实例并存,业务需自行幂等。
 
-### 状态机(8 态)
+### 状态机(9 态)
 
 | 状态 | 含义 |
 |---|---|
 | `queued` | 排队(并发超限) |
 | `waiting_receive` | 已派发,等 worker 接收 |
 | `running` | 运行中(worker 上报) |
-| `success` / `failed` | 终态(失败含执行超时) |
+| `success` | 成功 |
+| `failed` | 失败(worker 失联/派发失败/重启清理) |
+| `timeout` | 执行超时 |
 | `skipped` | 排队等待超时(⚠ 当前未实现,预留) |
 | `canceled` / `stopped` | 取消 / 手动停止 |
 

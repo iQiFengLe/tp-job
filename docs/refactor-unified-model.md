@@ -162,7 +162,7 @@ type InstanceLogger interface {
 
 ---
 
-## 5. 状态机(8 态)
+## 5. 状态机(9 态)
 
 | 状态 | 含义 |
 |---|---|
@@ -170,13 +170,14 @@ type InstanceLogger interface {
 | `waiting_receive` | 已派发,等 worker 接收/拉起 |
 | `running` | 运行中(worker 上报) |
 | `success` | 成功 |
-| `failed` | 失败(含执行超时,result 注明) |
-| `skipped` | 跳过(排队等待超时) |
+| `failed` | 失败(worker 失联/派发失败/重启清理) |
+| `timeout` | 执行超时(reaper 据 job.TimeoutSec) |
+| `skipped` | 跳过(排队等待超时;⚠ 当前未实现,预留) |
 | `canceled` | 取消 |
 | `stopped` | 手动取消 |
 
-- 不设 `timeout`/`pending`:执行超时归 `failed`;实例创建即 `queued`/派发即 `waiting_receive`。
-- 典型流转:`queued → waiting_receive → running → success`;reaper 把卡在 `waiting_receive`/`running` 的标 `failed` 重派。终态不可回退(worker 迟到上报忽略)。
+- 不设 `pending`:实例创建即 `queued`/派发即 `waiting_receive`。执行超时独立为 `timeout`(区别于 `failed`);`failed`/`timeout` 均可重试,`skipped` 不可。
+- 典型流转:`queued → waiting_receive → running → success`;reaper 把卡在 `waiting_receive`/`running` 的按成因标 `failed`(失联/未绑定)或 `timeout`(执行超 `TimeoutSec`)重派。终态不可回退(worker 迟到上报忽略)。
 
 ---
 
@@ -255,8 +256,8 @@ POST /server/reportLog               {instanceLogContents:[...]}
 - `Run`:扫描 `Job.NextRunTime` 到期 → 认领(`AdvanceNextRun` 乐观锁)→ 选 worker → 派发(§7.2)。
 - 任务级并发槽随实例生命周期持有(本次修复已对齐):派发后绑定实例,worker 回报终态/reaper 转移才释放。`MaxConcurrency` 按"在跑实例数"计数。
 - 手动触发超限 → memQueue + DB 两层排队,`MaxWaitSeconds` 超时落 `skipped`。
-- **reaper**:扫 `waiting_receive`/`running`,worker 心跳超时或超 `TimeoutSec` → `failed` + 触发重试。
-- **RetryPump**:扫 `failed` 且 `next_retry_time` 到期,按 `rootOrSelf` 建重试实例重派。删 `recoverRetries`(DB 不丢)。
+- **reaper**:扫 `waiting_receive`/`running`,worker 心跳超时/未绑定 → `failed`;执行超 `TimeoutSec` → `timeout`;均触发重试。
+- **RetryPump**:扫 `failed`/`timeout` 且 `next_retry_time` 到期,按 `rootOrSelf` 建重试实例重派。删 `recoverRetries`(DB 不丢)。
 
 ---
 

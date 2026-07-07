@@ -2,13 +2,14 @@ import dayjs from 'dayjs';
 
 export const PAGE_SIZE = 20;
 
-// 8 态状态机颜色(见 docs/refactor-unified-model.md §5)
+// 9 态状态机颜色(见 docs/refactor-unified-model.md §5)
 export const statusColor: Record<string, string> = {
   queued: 'default',
   waiting_receive: 'processing',
   running: 'processing',
   success: 'success',
   failed: 'error',
+  timeout: 'orange',
   skipped: 'default',
   canceled: 'default',
   stopped: 'warning',
@@ -20,12 +21,13 @@ export const statusLabel: Record<string, string> = {
   running: '运行中',
   success: '成功',
   failed: '失败',
+  timeout: '已超时',
   skipped: '已跳过',
   canceled: '已取消',
   stopped: '已停止',
 };
 
-export const statusOptions = ['queued', 'waiting_receive', 'running', 'success', 'failed', 'skipped', 'canceled', 'stopped'].map(
+export const statusOptions = ['queued', 'waiting_receive', 'running', 'success', 'failed', 'timeout', 'skipped', 'canceled', 'stopped'].map(
   (value) => ({ label: statusLabel[value] || value, value }),
 );
 

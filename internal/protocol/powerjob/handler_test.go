@@ -134,7 +134,7 @@ func TestReportInstanceStatus(t *testing.T) {
 	if got.Status != domain.StatusSuccess {
 		t.Fatalf("终态守护应拒绝覆盖, got %s", got.Status)
 	}
-	// 非法码 7 静默
+	// 服务端态码 7(timeout) worker 不可上报,应静默拒绝(防伪造终态)
 	do(t, "POST", "/server/reportInstanceStatus",
 		ReportInstanceStatusReq{InstanceID: wire.FlexInt64(ins.ID), InstanceStatus: 7}, d)
 	// 字符串写法(多语言 worker 实际发 "instanceId":"5"):FlexInt64 必须兼容,状态也能推进

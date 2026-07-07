@@ -9,7 +9,7 @@ package powerjob
 import "task-schedule/internal/domain"
 
 // PowerJob 官方 InstanceStatus 数字码(1/2/3/4/5/9/10 与 tech.powerjob.common.enums.InstanceStatus 一致;
-// 6 为本服务自定义扩展码 skipped,仅服务端写,worker 永不上报)。
+// 6=skipped、7=timeout 为本服务自定义扩展码,仅服务端写,worker 永不上报)。
 const (
 	WireWaitingDispatch      = 1
 	WireWaitingWorkerReceive = 2
@@ -17,6 +17,7 @@ const (
 	WireFailed               = 4
 	WireSucceed              = 5
 	WireSkipped              = 6
+	WireTimeout              = 7
 	WireCanceled             = 9
 	WireStopped              = 10
 )
@@ -36,6 +37,8 @@ func WireToDomain(s int) (string, bool) {
 		return domain.StatusSuccess, true
 	case WireSkipped:
 		return domain.StatusSkipped, true
+	case WireTimeout:
+		return domain.StatusTimeout, true
 	case WireCanceled:
 		return domain.StatusCanceled, true
 	case WireStopped:
@@ -59,6 +62,8 @@ func DomainToWire(s string) int {
 		return WireSucceed
 	case domain.StatusSkipped:
 		return WireSkipped
+	case domain.StatusTimeout:
+		return WireTimeout
 	case domain.StatusCanceled:
 		return WireCanceled
 	case domain.StatusStopped:
@@ -69,7 +74,7 @@ func DomainToWire(s string) int {
 	return WireFailed
 }
 
-// IsValidWireReport worker 上报的合法值:{1,2,3,4,5,9,10};6(skipped)是服务端自定义码,worker 永不上报。
+// IsValidWireReport worker 上报的合法值:{1,2,3,4,5,9,10};6(skipped)、7(timeout)是服务端自定义码,worker 永不上报。
 func IsValidWireReport(s int) bool {
 	switch s {
 	case WireWaitingDispatch, WireWaitingWorkerReceive, WireRunning,

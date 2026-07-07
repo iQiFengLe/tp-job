@@ -106,15 +106,15 @@ func (s *InstanceService) Cancel(id int64) error {
 	return nil
 }
 
-// Retry 立即重试一个 failed 实例:有重试余力则设 next_retry_time=now 交 RetryPump 重派
-// (供 OpenAPI retryInstance)。非 failed 或无余力返回 error。
+// Retry 立即重试一个 failed/timeout 实例:有重试余力则设 next_retry_time=now 交 RetryPump 重派
+// (供 OpenAPI retryInstance)。非可重试态(failed/timeout)或无余力返回 error。
 func (s *InstanceService) Retry(id int64) error {
 	ins, err := s.Get(id)
 	if err != nil {
 		return err
 	}
-	if ins.Status != domain.StatusFailed {
-		return fmt.Errorf("仅 failed 实例可重试,当前状态: %s", ins.Status)
+	if !domain.StatusRetryable(ins.Status) {
+		return fmt.Errorf("仅 failed/timeout 实例可重试,当前状态: %s", ins.Status)
 	}
 	job, err := s.st.Job.Get(ins.AppID, ins.JobID)
 	if err != nil {

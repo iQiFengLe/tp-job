@@ -3,7 +3,7 @@ package domain
 import "testing"
 
 func TestStatusTerminal(t *testing.T) {
-	for _, s := range []string{StatusSuccess, StatusFailed, StatusSkipped, StatusCanceled, StatusStopped} {
+	for _, s := range []string{StatusSuccess, StatusFailed, StatusTimeout, StatusSkipped, StatusCanceled, StatusStopped} {
 		if !StatusTerminal(s) {
 			t.Errorf("%q 应为终态", s)
 		}
@@ -20,7 +20,7 @@ func TestStatusTerminal(t *testing.T) {
 
 func TestStatusValid(t *testing.T) {
 	for _, s := range []string{StatusQueued, StatusWaitingReceive, StatusRunning, StatusSuccess,
-		StatusFailed, StatusSkipped, StatusCanceled, StatusStopped} {
+		StatusFailed, StatusTimeout, StatusSkipped, StatusCanceled, StatusStopped} {
 		if !StatusValid(s) {
 			t.Errorf("%q 应合法", s)
 		}
@@ -28,8 +28,22 @@ func TestStatusValid(t *testing.T) {
 	if StatusValid("hacked") {
 		t.Error("非法状态不应通过校验")
 	}
-	if got := TerminalStatuses(); len(got) != 5 {
-		t.Errorf("终态应为 5 个, got %d (%v)", len(got), got)
+	if got := TerminalStatuses(); len(got) != 6 {
+		t.Errorf("终态应为 6 个, got %d (%v)", len(got), got)
+	}
+}
+
+func TestStatusRetryable(t *testing.T) {
+	for _, s := range []string{StatusFailed, StatusTimeout} {
+		if !StatusRetryable(s) {
+			t.Errorf("%q 应可重试", s)
+		}
+	}
+	for _, s := range []string{StatusQueued, StatusWaitingReceive, StatusRunning, StatusSuccess,
+		StatusSkipped, StatusCanceled, StatusStopped} {
+		if StatusRetryable(s) {
+			t.Errorf("%q 不应可重试", s)
+		}
 	}
 }
 

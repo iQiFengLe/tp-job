@@ -2,17 +2,19 @@ package domain
 
 import "time"
 
-// 实例状态机(8 态)。领域层只认这些 string;外部协议(PowerJob 数字码等)在协议适配层翻译。
+// 实例状态机(9 态)。领域层只认这些 string;外部协议(PowerJob 数字码等)在协议适配层翻译。
 //
-// 流转:queued(排队) → waiting_receive(已派发等 worker 接收) → running(执行中) → success/failed;
-// reaper 把卡在 waiting_receive/running 的实例标 failed 重派;终态不可回退。
+// 流转:queued(排队) → waiting_receive(已派发等 worker 接收) → running(执行中) → success/failed/timeout;
+// reaper 把卡在 waiting_receive/running 的实例按成因标 failed(worker 失联/未绑定)或 timeout(执行超 TimeoutSec)
+// 并重派;终态不可回退。
 const (
 	StatusQueued         = "queued"          // 排队(并发超限)
 	StatusWaitingReceive = "waiting_receive" // 已派发,等 worker 接收/拉起
 	StatusRunning        = "running"         // 运行中(worker 上报)
 	StatusSuccess        = "success"         // 成功
-	StatusFailed         = "failed"          // 失败(含执行超时,result 注明)
-	StatusSkipped        = "skipped"         // 跳过(排队等待超时;⚠ 当前未实现,预留——无代码路径产出此状态)
+	StatusFailed         = "failed"          // 失败(worker 失联/派发失败/重启清理)
+	StatusTimeout        = "timeout"         // 执行超时(reaper 据 job.TimeoutSec;与 failed 同样可重试)
+	StatusSkipped        = "skipped"         // 跳过(排队等待超时;⚠ 当前未实现,预留——无代码路径产出此状态,且不可重试)
 	StatusCanceled       = "canceled"        // 取消
 	StatusStopped        = "stopped"         // 手动取消
 )
@@ -20,7 +22,7 @@ const (
 // StatusTerminal 是否终态(写入后不可回退,防 worker 乱序/重复上报覆盖)。
 func StatusTerminal(s string) bool {
 	switch s {
-	case StatusSuccess, StatusFailed, StatusSkipped, StatusCanceled, StatusStopped:
+	case StatusSuccess, StatusFailed, StatusTimeout, StatusSkipped, StatusCanceled, StatusStopped:
 		return true
 	}
 	return false
@@ -30,7 +32,7 @@ func StatusTerminal(s string) bool {
 func StatusValid(s string) bool {
 	switch s {
 	case StatusQueued, StatusWaitingReceive, StatusRunning, StatusSuccess,
-		StatusFailed, StatusSkipped, StatusCanceled, StatusStopped:
+		StatusFailed, StatusTimeout, StatusSkipped, StatusCanceled, StatusStopped:
 		return true
 	}
 	return false
@@ -38,7 +40,17 @@ func StatusValid(s string) bool {
 
 // TerminalStatuses 返回终态切片,用于 SQL "终态不可回退" 守护的 NOT IN 列表。
 func TerminalStatuses() []string {
-	return []string{StatusSuccess, StatusFailed, StatusSkipped, StatusCanceled, StatusStopped}
+	return []string{StatusSuccess, StatusFailed, StatusTimeout, StatusSkipped, StatusCanceled, StatusStopped}
+}
+
+// StatusRetryable 是否可重试态(failed/timeout)。reaper 自动重试(RetryPump 扫这两个态)与 OpenAPI 手动
+// Retry 均据此判定;success/skipped/canceled/stopped 不可重试(skipped 预留排队超时,语义上亦不重试)。
+func StatusRetryable(s string) bool {
+	switch s {
+	case StatusFailed, StatusTimeout:
+		return true
+	}
+	return false
 }
 
 // Instance 一次任务执行的实例。

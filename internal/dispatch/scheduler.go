@@ -23,8 +23,8 @@ import (
 // ReleaseInFlight 释放)。定时触发固定串行(同 job 有实例在飞则跳过本次到期,不推进游标)。
 //
 // 失败兜底两条:
-//   - RunInstanceReaper:扫 waiting_receive/running 实例,worker 失联或执行超 TimeoutSec → failed 重派。
-//   - RunRetryPump:扫 failed 且 next_retry_time 到期的实例,按 retryIndex+1 重派(DB 驱动,重启不丢)。
+//   - RunInstanceReaper:扫 waiting_receive/running 实例,worker 失联/未绑定 → failed;执行超 TimeoutSec → timeout;均重派。
+//   - RunRetryPump:扫 failed/timeout 且 next_retry_time 到期的实例,按 retryIndex+1 重派(DB 驱动,重启不丢)。
 type Scheduler struct {
 	store     *repository.Store
 	executor  domain.Executor
@@ -589,8 +589,8 @@ func (s *Scheduler) ReleaseInFlight(insID int64) {
 // ===== 失败转移 reaper =====
 //
 // worker 收到任务后异步执行并回报。若 worker 崩溃/网络分区/静默死亡,实例会永久停在
-// waiting_receive/running,形成"任务吊死"。reaper 周期扫描,对"绑定 worker 已失联"或
-// "执行超过 job.TimeoutSec"的实例标记 failed 并触发服务端重试。
+// waiting_receive/running,形成"任务吊死"。reaper 周期扫描,对"绑定 worker 已失联"的实例标记
+// failed、对"执行超过 job.TimeoutSec"的实例标记 timeout,并触发服务端重试。
 // at-least-once:worker 迟到的成功回报可能与重派实例并存,业务需自行幂等。
 
 // RunInstanceReaper 周期扫描未终结实例做失败转移,直到 ctx 取消。
@@ -647,11 +647,11 @@ func (s *Scheduler) reapOnce(reg *workerreg.Registry) {
 			ins := list[i]
 			job := jobs[ins.JobID]
 			if job == nil {
-				s.finalizeReaped(&ins, "job 不存在,失败转移", nil)
+				s.finalizeReaped(&ins, domain.StatusFailed, "job 不存在,失败转移", nil)
 				continue
 			}
-			if reason := s.stallReason(&ins, job, reg, now); reason != "" {
-				s.finalizeReaped(&ins, reason, job)
+			if reason, status := s.stallReason(&ins, job, reg, now); reason != "" {
+				s.finalizeReaped(&ins, status, reason, job)
 			}
 		}
 	}
@@ -668,20 +668,21 @@ func (s *Scheduler) reapOnce(reg *workerreg.Registry) {
 			ins := unboundList[i]
 			job := unboundJobs[ins.JobID]
 			if job == nil {
-				s.finalizeReaped(&ins, "job 不存在,失败转移", nil)
+				s.finalizeReaped(&ins, domain.StatusFailed, "job 不存在,失败转移", nil)
 				continue
 			}
-			s.finalizeReaped(&ins, "worker 无法处理已解绑", job)
+			s.finalizeReaped(&ins, domain.StatusFailed, "worker 无法处理已解绑", job)
 		}
 	}
 }
 
-// finalizeReaped 标记实例 failed + 释放槽 + 调度重试(设 next_retry_time)。
-// job 透传给 scheduleRetry(reaper 路径已 loadJobs,避免重复 Job.Get);nil 时 scheduleRetry 自查。
-func (s *Scheduler) finalizeReaped(ins *domain.Instance, reason string, job *domain.Job) {
-	// payload 用 tx 内 latest 行(含本次写入的 failed/result),无需预先内存赋值;job 可能为 nil,
+// finalizeReaped 标记实例终态(failed: worker 失联/未绑定/重启清理;timeout: 执行超 TimeoutSec)
+// + 释放槽 + 调度重试(设 next_retry_time)。job 透传给 scheduleRetry(reaper 路径已 loadJobs,避免
+// 重复 Job.Get);nil 时 scheduleRetry 自查。
+func (s *Scheduler) finalizeReaped(ins *domain.Instance, status, reason string, job *domain.Job) {
+	// payload 用 tx 内 latest 行(含本次写入的 status/result),无需预先内存赋值;job 可能为 nil,
 	// cbBuild→Build 对 nil job 返回 nil(不插回调)。
-	rows, err := s.store.Instance.UpdateResultWithCallback(ins.ID, domain.StatusFailed, reason, s.cbBuild(job, domain.StatusFailed))
+	rows, err := s.store.Instance.UpdateResultWithCallback(ins.ID, status, reason, s.cbBuild(job, status))
 	if err != nil {
 		s.log.Error("reaper 标记失败", "instance_id", ins.ID, "err", err)
 		return
@@ -689,44 +690,45 @@ func (s *Scheduler) finalizeReaped(ins *domain.Instance, reason string, job *dom
 	if rows == 0 {
 		return // 已被并发终结(worker 迟到回报 / RecoverStaleActive),不重复 Release/scheduleRetry
 	}
-	s.appendLogRaw(ins, "REAP", "error", "失败转移: "+reason)
+	s.appendLogRaw(ins, "REAP", "error", "失败转移("+status+"): "+reason)
 	s.ReleaseInFlight(ins.ID)
 	s.scheduleRetry(ins, job)
 }
 
-// stallReason 判定实例是否卡死。空串=未卡死。
+// stallReason 判定实例是否卡死。返回 (卡死原因, 应置终态);reason 空串=未卡死(status 亦为空)。
+// 终态取值:worker 未绑定/失联 → failed;执行超时 → timeout。
 //
 // 兜底优先级:worker 未绑定 → worker 失联 → 执行超时。执行超时仅在 job.TimeoutSec>0 时生效:
 // TimeoutSec=0 表示"不限执行时长"(长任务语义),此时若 worker 持续心跳(在线)却永不推进,
 // 实例会停在 waiting_receive/running 不被回收——故生产强烈建议为 job 配置合理的 TimeoutSec,
 // 否则唯一能兜底的只有 worker 心跳真的停掉(失联判定)或服务重启(start_time 超 grace 后
 // RecoverStaleActive 清理)。grace 内的这类卡死实例会滞留到 start_time 超 grace 的下次重启。
-func (s *Scheduler) stallReason(ins *domain.Instance, job *domain.Job, reg *workerreg.Registry, now time.Time) string {
+func (s *Scheduler) stallReason(ins *domain.Instance, job *domain.Job, reg *workerreg.Registry, now time.Time) (reason, status string) {
 	if ins.WorkerAddress == "" {
 		// 选后即绑后,正常派发不会出现「已派发态却无 worker 绑定」:MarkDispatched 先写 worker_address
 		// 再置 waiting_receive。命中此分支必为异常(worker 对未绑定实例乱回报 / SetStatus / 迁移脏数据),
 		// 应立即回收(→ reaper failed → scheduleRetry)。不再给 30s 宽限:它既兜不住崩溃恢复
 		// (RecoverStaleActive 在重启时接管,此时 TriggerTime 已远超窗口),反而延迟真正卡死实例的检测。
-		return "实例缺少 worker 绑定"
+		return "实例缺少 worker 绑定", domain.StatusFailed
 	}
 	// warmup 守卫:服务重启后 workerreg 是空的,worker 需一个心跳周期才重新注册——此期间 IsOnline 必为
 	// false,若直接判失联会误杀所有"重启前在飞"的正常实例(worker 迟到 success 被终态守护拒绝 → 重复执行)。
 	// warmup 内跳过"worker 失联"判定,仅保留下面的执行超时(TimeoutSec)判定。warmup 由配置
 	// worker.warmup_seconds 控制(默认 30s ≥ 典型 10s 心跳 + 余量);零值=未启用(测试/旧路径)。
 	if !s.inWarmup(now) && reg != nil && !reg.IsOnline(ins.AppID, ins.WorkerAddress) {
-		return "worker 失联(心跳超时)"
+		return "worker 失联(心跳超时)", domain.StatusFailed
 	}
 	if job.TimeoutSec > 0 && ins.StartTime != nil {
 		if now.Sub(*ins.StartTime) > time.Duration(job.TimeoutSec)*time.Second {
-			return "实例执行超时(>" + strconv.Itoa(job.TimeoutSec) + "s)"
+			return "实例执行超时(>" + strconv.Itoa(job.TimeoutSec) + "s)", domain.StatusTimeout
 		}
 	}
-	return ""
+	return "", ""
 }
 
 // ===== DB 驱动重试 RetryPump =====
 
-// RunRetryPump 周期扫描 failed 且 next_retry_time 到期的实例,按 retryIndex+1 重派。直到 ctx 取消。
+// RunRetryPump 周期扫描 failed/timeout 且 next_retry_time 到期的实例,按 retryIndex+1 重派。直到 ctx 取消。
 func (s *Scheduler) RunRetryPump(ctx context.Context) {
 	t := time.NewTicker(s.interval)
 	defer t.Stop()
@@ -816,7 +818,7 @@ func (s *Scheduler) retryInstance(ctx context.Context, job *domain.Job, orig *do
 	})
 }
 
-// scheduleRetry failed 实例若仍有重试余力,设 next_retry_time 由 RetryPump 重派。
+// scheduleRetry failed/timeout 实例若仍有重试余力,设 next_retry_time 由 RetryPump 重派。
 // job 为调用方预加载的 *Job(reaper/recover 路径已批量 loadJobs,避免重复查询);nil 时内部自查。
 func (s *Scheduler) scheduleRetry(ins *domain.Instance, job *domain.Job) {
 	if job == nil {

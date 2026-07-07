@@ -152,14 +152,14 @@ func (s InstanceStore) ClearNextRetryTime(id int64) (bool, error) {
 	return res.RowsAffected > 0, res.Error
 }
 
-// ListRetryDue failed 且 next_retry_time 到期的实例,供 RetryPump 扫描。
+// ListRetryDue failed/timeout 且 next_retry_time 到期的实例,供 RetryPump 扫描(两者皆可重试)。
 func (s InstanceStore) ListRetryDue(now time.Time, limit int) ([]domain.Instance, error) {
 	var list []domain.Instance
 	if limit <= 0 {
 		limit = 500
 	}
-	err := s.db.Where("status = ? AND next_retry_time IS NOT NULL AND next_retry_time <= ?",
-		domain.StatusFailed, now).
+	err := s.db.Where("status IN ? AND next_retry_time IS NOT NULL AND next_retry_time <= ?",
+		[]string{domain.StatusFailed, domain.StatusTimeout}, now).
 		Order("next_retry_time ASC").Limit(limit).Find(&list).Error
 	return list, err
 }
