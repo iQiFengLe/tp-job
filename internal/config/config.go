@@ -45,7 +45,8 @@ type Log struct {
 	MaxBackups int    `yaml:"max_backups"`
 	MaxAgeDays int    `yaml:"max_age_days"`
 
-	// InstanceRetentionDays 实例日志文件保留天数;0=不自动清理。清理按文件 mtime。
+	// InstanceRetentionDays 实例日志文件保留天数(清理按文件 mtime)。
+	// 0=未设置(applyDefaults 兜底 90);>0=保留天数;-1=不清理(显式逃生口,instancelog 以 retention<=0 判定)。
 	InstanceRetentionDays int `yaml:"instance_retention_days"`
 }
 
@@ -67,6 +68,7 @@ type CallbackCfg struct {
 
 type Worker struct {
 	TimeoutSeconds int `yaml:"timeout_seconds"` // worker 心跳超时(秒),超过视为离线
+	WarmupSeconds  int `yaml:"warmup_seconds"`  // reaper 启动宽限(秒):窗口内跳过"worker 失联"判定,给重启后 worker 重新心跳注册留时间,避免误杀重启前在飞的正常实例(默认 30)
 }
 
 // PowerJob 兼容协议配置。/server/* + /openApi/* 端点始终挂载(供遵循 PowerJob 协议的自研 http worker /
@@ -171,6 +173,9 @@ func (c *Config) applyDefaults() {
 	if c.Log.MaxAgeDays == 0 {
 		c.Log.MaxAgeDays = 30
 	}
+	if c.Log.InstanceRetentionDays == 0 {
+		c.Log.InstanceRetentionDays = 90
+	}
 	if c.Scheduler.IntervalMs == 0 {
 		c.Scheduler.IntervalMs = 1000
 	}
@@ -191,6 +196,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Worker.TimeoutSeconds == 0 {
 		c.Worker.TimeoutSeconds = 600
+	}
+	if c.Worker.WarmupSeconds == 0 {
+		c.Worker.WarmupSeconds = 30
 	}
 	if c.Auth.Session.TTLSeconds == 0 {
 		c.Auth.Session.TTLSeconds = 86400

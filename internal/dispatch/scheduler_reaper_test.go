@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -174,6 +175,76 @@ func TestListUnboundQueued(t *testing.T) {
 	if list[0].ID != ins1.ID {
 		t.Errorf("应返回 ins1, got %d", list[0].ID)
 	}
+}
+
+// TestReaperWarmupSkipsWorkerOffline 验证 reaper 启动宽限:服务重启后 workerreg 尚空、worker 未及
+// 重新心跳注册,此期间 reaper 不应把"重启前在飞"的实例判为 worker 失联(否则失败转移 → 重复执行)。
+// warmup 关闭后恢复正常失联判定。
+func TestReaperWarmupSkipsWorkerOffline(t *testing.T) {
+	st := newTestStore(t)
+	reg := workerreg.New(time.Minute, nil) // 空 reg:任何 worker 都判"不在线",模拟重启后 worker 未回心
+	il := instancelog.New(t.TempDir(), 0)
+	exec := &fakeExecutor{pick: true}
+	sch := NewScheduler(st, exec, il, 50*time.Millisecond, testLog(), NoopCallbackBuilder{})
+	sch.SetReaperWarmup(10 * time.Second) // warmup 窗口内
+
+	app := &domain.App{AppName: "warmup", Password: "p"}
+	_ = st.App.Create(app)
+	job := &domain.Job{AppID: app.ID, Name: "j", ExecuteType: "http", RetryCount: 0}
+	_ = st.Job.Create(job)
+
+	// 重启前在飞的实例:waiting_receive + 已绑定 worker,但该 worker 重启后还没重新心跳(reg 里没有)
+	stime := time.Now().Add(-30 * time.Second)
+	ins := &domain.Instance{
+		JobID: job.ID, AppID: app.ID,
+		Status:        domain.StatusWaitingReceive,
+		WorkerAddress: "10.0.0.5:9000",
+		TriggerType:   "auto",
+		TriggerTime:   stime,
+		StartTime:     &stime,
+	}
+	_ = st.Instance.Create(ins)
+
+	// warmup 内:reaper 不应判 worker 失联 → 实例仍 waiting_receive(避免重启误杀)
+	sch.reapOnce(reg)
+	if got, _ := st.Instance.Get(ins.ID); got.Status != domain.StatusWaitingReceive {
+		t.Fatalf("warmup 内不应判 worker 失联(避免重启误杀), got %s", got.Status)
+	}
+
+	// warmup 关闭后:同样的实例应被 reaper 判失联 → failed
+	sch.SetReaperWarmup(0)
+	sch.reapOnce(reg)
+	if got, _ := st.Instance.Get(ins.ID); got.Status != domain.StatusFailed {
+		t.Fatalf("warmup 关闭后应判 worker 失联 → failed, got %s", got.Status)
+	}
+}
+
+// TestGoTrackRecoversAndRestarts 验证 goTrack 的 panic 自愈:fn 首次 panic 后应 recover 并自动重启,
+// 不崩进程、不静默停摆。第二次执行正常(等 ctx 取消退出)。
+func TestGoTrackRecoversAndRestarts(t *testing.T) {
+	st := newTestStore(t)
+	il := instancelog.New(t.TempDir(), 0)
+	sch := NewScheduler(st, New(workerreg.New(time.Minute, nil), time.Second), il, 50*time.Millisecond, testLog(), NoopCallbackBuilder{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var count int32
+	done := make(chan struct{})
+	sch.goTrack(func() {
+		if atomic.AddInt32(&count, 1) == 1 {
+			panic("首次执行 panic,应被自愈后重启")
+		}
+		<-ctx.Done() // 第二次起正常:等 ctx 取消后退出
+		close(done)
+	})
+
+	// panic 后 runTracked sleep 1s 再重启,3s 内应观察到 count>=2(说明已重启)。
+	waitFor(t, 3*time.Second, func() bool { return atomic.LoadInt32(&count) >= 2 }, "goTrack 应在 panic 后自愈重启")
+
+	cancel() // 触发第二次 fn 正常 return → goroutine 退出
+	<-done
+	sch.Wait()
 }
 
 // 辅助：fake Executor

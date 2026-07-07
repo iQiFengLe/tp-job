@@ -393,6 +393,9 @@ func parsePage(c *gin.Context) (int, int) {
 	if page < 1 {
 		page = 1
 	}
+	if page > 100000 { // 防 page 过大导致巨大 OFFSET 慢查询(DoS);超大数据集应改游标分页
+		page = 100000
+	}
 	if size < 1 || size > 500 {
 		size = 20
 	}

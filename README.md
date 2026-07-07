@@ -85,7 +85,7 @@ worker 启动 → 心跳 {appName, workerAddress, systemMetrics, tags} (无 toke
 | `waiting_receive` | 已派发,等 worker 接收 |
 | `running` | 运行中(worker 上报) |
 | `success` / `failed` | 终态(失败含执行超时) |
-| `skipped` | 排队等待超时 |
+| `skipped` | 排队等待超时(⚠ 当前未实现,预留) |
 | `canceled` / `stopped` | 取消 / 手动停止 |
 
 终态不可回退(worker 迟到上报忽略;`MarkDispatched` / `UpdateResult` 均守护终态)。

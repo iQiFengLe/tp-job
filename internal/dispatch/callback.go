@@ -165,11 +165,39 @@ func NewCallbackPump(st *repository.Store, client *http.Client, interval time.Du
 
 func (p *CallbackPump) Start(ctx context.Context) {
 	p.wg.Add(1)
-	go func() { defer p.wg.Done(); p.run(ctx) }()
+	go func() {
+		defer p.wg.Done()
+		for {
+			if p.runSupervised(ctx, p.run) {
+				return
+			}
+		}
+	}()
 	if p.retention > 0 {
 		p.wg.Add(1)
-		go func() { defer p.wg.Done(); p.sweepLoop(ctx) }()
+		go func() {
+			defer p.wg.Done()
+			for {
+				if p.runSupervised(ctx, p.sweepLoop) {
+					return
+				}
+			}
+		}()
 	}
+}
+
+// runSupervised 执行 fn:正常返回 true;panic 时 recover+log+1s 退避后返回 false(供重启决策)。
+func (p *CallbackPump) runSupervised(ctx context.Context, fn func(context.Context)) (ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			p.log.Error("callback 循环 panic,1s 后重启", "panic", r)
+			time.Sleep(time.Second)
+		} else {
+			ok = true
+		}
+	}()
+	fn(ctx)
+	return
 }
 
 func (p *CallbackPump) Wait() { p.wg.Wait() }

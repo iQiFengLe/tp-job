@@ -14,6 +14,20 @@ func TestApplyDefaultsSessionTTL(t *testing.T) {
 	}
 }
 
+// TestApplyDefaultsInstanceRetention 实例日志保留兜底:0(未设置)→90;-1(显式不清理)保留不被覆盖。
+func TestApplyDefaultsInstanceRetention(t *testing.T) {
+	c := &Config{}
+	c.applyDefaults()
+	if c.Log.InstanceRetentionDays != 90 {
+		t.Fatalf("InstanceRetentionDays 未设置应兜底 90, got %d", c.Log.InstanceRetentionDays)
+	}
+	c2 := &Config{Log: Log{InstanceRetentionDays: -1}}
+	c2.applyDefaults()
+	if c2.Log.InstanceRetentionDays != -1 {
+		t.Fatalf("-1(显式不清理)不应被兜底覆盖, got %d", c2.Log.InstanceRetentionDays)
+	}
+}
+
 func TestApplyEnvStillHandlesNonAccount(t *testing.T) {
 	// admin 账户 env 已废弃(走 DB),设了也不应有副作用;DB 驱动等非账户 env 仍生效。
 	t.Setenv("TASK_SCHEDULE_ADMIN_USERNAME", "ops")

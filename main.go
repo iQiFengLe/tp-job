@@ -52,12 +52,41 @@ func resolveWebFS() fs.FS {
 
 func main() {
 	cfgPath := flag.String("config", "config.yaml", "配置文件路径")
+	// 常用启动参数:仅显式指定时覆盖,优先级 flag > env > yaml > 内置默认。
+	// server.mode / auth.login 等安全相关项刻意不开放 flag(对齐"env 不可覆盖"的防降级设计)。
+	port := flag.Int("port", 0, "server.port 监听端口(默认 8080)")
+	dbDriver := flag.String("db-driver", "", "database.driver: sqlite | mysql")
+	sqlitePath := flag.String("sqlite-path", "", "database.sqlite.path")
+	mysqlDSN := flag.String("mysql-dsn", "", "database.mysql.dsn(⚠ 会进命令行历史/进程列表,敏感数据建议用 env 或 yaml)")
+	logLevel := flag.String("log-level", "", "log.level: debug | info | warn | error")
+	logDir := flag.String("log-dir", "", "log.dir(主日志 + 实例日志根目录)")
+	powerjobServer := flag.String("powerjob-server", "", "powerjob.server_address(/server/acquire 返回值,PowerJob worker 可达地址)")
 	flag.Parse()
 
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		fail(err)
 	}
+	// 显式指定的 flag 覆盖配置(优先级高于 env/yaml)。flag.Visit 只遍历显式设置的 flag,
+	// 故未指定的 flag 不影响 yaml/env 已解析的值。
+	flag.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "port":
+			cfg.Server.Port = *port
+		case "db-driver":
+			cfg.Database.Driver = *dbDriver
+		case "sqlite-path":
+			cfg.Database.SQLite.Path = *sqlitePath
+		case "mysql-dsn":
+			cfg.Database.MySQL.DSN = *mysqlDSN
+		case "log-level":
+			cfg.Log.Level = *logLevel
+		case "log-dir":
+			cfg.Log.Dir = *logDir
+		case "powerjob-server":
+			cfg.PowerJob.ServerAddress = *powerjobServer
+		}
+	})
 
 	log, err := logger.Init(cfg.Log)
 	if err != nil {
@@ -88,6 +117,9 @@ func main() {
 	exec := dispatch.New(reg, 10*time.Second) // 派发 POST 超时(远小于实例执行超时)
 	cbBuilder := dispatch.NewCallbackBuilder(cfg.Scheduler.Callback.Enabled)
 	sch := dispatch.NewScheduler(st, exec, il, time.Duration(cfg.Scheduler.IntervalMs)*time.Millisecond, log, cbBuilder)
+	// reaper 启动宽限:避免服务重启时 workerreg 尚空、worker 未及重新心跳,被 reaper 误判失联而批量
+	// 失败转移"重启前在飞"的实例(导致重复执行)。默认 30s(cfg.Worker.WarmupSeconds)。
+	sch.SetReaperWarmup(time.Duration(cfg.Worker.WarmupSeconds) * time.Second)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -143,13 +175,34 @@ func main() {
 		Transport: dispatch.NewDialTransport(15 * time.Second),
 	})
 	var bg sync.WaitGroup
-	runBG := func(fn func()) {
+	// runBG 启动带 panic 自愈的后台循环:fn panic 时 recover+log+1s 退避后重启(fn 正常返回则退出)。
+	// 防止 workerreg/auth/instancelog 任一循环因单点 panic 静默停止。
+	runBG := func(name string, fn func()) {
 		bg.Add(1)
-		go func() { defer bg.Done(); fn() }()
+		go func() {
+			defer bg.Done()
+			for {
+				ok := func() (ok bool) {
+					defer func() {
+						if r := recover(); r != nil {
+							log.Error("后台循环 panic,1s 后重启", "name", name, "panic", r)
+							time.Sleep(time.Second)
+						} else {
+							ok = true
+						}
+					}()
+					fn()
+					return
+				}()
+				if ok {
+					return
+				}
+			}
+		}()
 	}
-	runBG(func() { reg.Run(ctx) })
-	runBG(func() { authStore.Run(ctx) })
-	runBG(func() { il.Run(ctx) })
+	runBG("workerreg", func() { reg.Run(ctx) })
+	runBG("auth", func() { authStore.Run(ctx) })
+	runBG("instancelog", func() { il.Run(ctx) })
 
 	// HTTP 服务
 	webFS := resolveWebFS()

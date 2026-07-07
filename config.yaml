@@ -23,7 +23,7 @@ log:
   max_size_mb: 100
   max_backups: 10
   max_age_days: 30
-  instance_retention_days: 0  # 实例日志保留天数;0=不自动清理(按文件 mtime 清理)
+  instance_retention_days: 90  # 实例日志保留天数(按文件 mtime 清理);0=用默认 90;-1=不清理
 
 scheduler:
   interval_ms: 1000   # 调度/reaper/retry/callback pump 扫描间隔(毫秒)
@@ -39,6 +39,7 @@ scheduler:
 
 worker:
   timeout_seconds: 600   # worker 心跳超时(秒),超过视为离线(reaper 据此失败转移)。默认 10 分钟
+  warmup_seconds: 30     # reaper 启动宽限:窗口内跳过"worker 失联"判定,给重启后 worker 重新心跳注册留时间(避免误杀重启前在飞的实例)。默认 30s(≥ 典型 10s 心跳 + 余量)
 
 powerjob:
   # /server/* 始终挂载(标准 PowerJob Java worker 不改源码接入)。⚠ /server/*、/worker/* 无鉴权,

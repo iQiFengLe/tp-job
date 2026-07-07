@@ -31,7 +31,7 @@ type Job struct {
 
 	// —— 并发 / 排队 / 重试 ——
 	MaxConcurrency   int  `gorm:"default:1" json:"max_concurrency,omitempty"`
-	MaxWaitSeconds   int  `gorm:"default:0" json:"max_wait_seconds,omitempty"`
+	MaxWaitSeconds   int  `gorm:"default:0" json:"max_wait_seconds,omitempty"` // 排队等待超时(秒;⚠ 当前未实现,预留——配置后无效果)
 	RetryCount       int  `gorm:"default:0" json:"retry_count,omitempty"`
 	RetryIntervalSec int  `gorm:"default:0" json:"retry_interval_sec,omitempty"`
 	DefaultPriority  int  `gorm:"default:0" json:"default_priority,omitempty"`

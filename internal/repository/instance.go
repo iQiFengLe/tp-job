@@ -192,9 +192,14 @@ func (s InstanceStore) ListGeneralizedActive(olderThan time.Time, limit int) ([]
 // 手动优先队列是纯内存,重启即丢;queued 实例不被 reaper(只看 waiting_receive/running)/
 // RetryPump(只看 failed)捞,需在启动时重新入队,否则永久滞留。auto/retry 触发路径在
 // Create(queued) 与 Dispatch 之间崩溃也会残留 queued,故恢复不再限定 trigger_type。
-func (s InstanceStore) ListQueued() ([]domain.Instance, error) {
+// limit>0 限制单次扫描量(防极端积压重启时一次性 load 打爆内存);调用方据 len==limit 判断是否还有剩余。
+func (s InstanceStore) ListQueued(limit int) ([]domain.Instance, error) {
 	var list []domain.Instance
-	err := s.db.Where("status = ?", domain.StatusQueued).Find(&list).Error
+	q := s.db.Where("status = ?", domain.StatusQueued)
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	err := q.Find(&list).Error
 	return list, err
 }
 

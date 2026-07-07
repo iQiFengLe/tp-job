@@ -53,6 +53,13 @@ type Scheduler struct {
 	// 避免关闭/测试结束后回调悬挂触发、持有 ins/job 指针妨碍 GC(pushPending 本身不碰 DB,无竞态)。
 	timerMu sync.Mutex
 	timers  map[int64]*time.Timer
+
+	// warmup reaper 启动宽限:此窗口内 stallReason 跳过"worker 失联"判定——服务重启后 workerreg 是空的,
+	// worker 需一个心跳周期才重新注册,直接判失联会误杀所有"重启前在飞"的正常实例(worker 迟到 success 被
+	// 终态守护拒绝 → 重复执行)。零值=不启用(测试/未配置路径,保持旧行为);生产由 SetReaperWarmup 注入。
+	// startedAt 取 NewScheduler 时刻作为 warmup 起算点(覆盖装配到 reaper 首轮的全程)。
+	warmup    time.Duration
+	startedAt time.Time
 }
 
 // NewScheduler 创建调度器。interval 为扫描周期。
@@ -69,7 +76,20 @@ func NewScheduler(st *repository.Store, exec domain.Executor, il *instancelog.Lo
 		wake:  make(chan struct{}, 1),
 		slots: make(map[int64]int), held: make(map[int64]int64),
 		timers: make(map[int64]*time.Timer),
+		startedAt: time.Now(),
 	}
+}
+
+// SetReaperWarmup 设置 reaper 启动宽限(装配层从 cfg.Worker.WarmupSeconds 注入,默认 30s)。
+// 不经 NewScheduler 签名传入:保持 NewScheduler 调用点(含 ~25 处测试)不变,warmup 零值=不启用=旧行为。
+// <=0 关闭 warmup(仅测试或显式关闭用);生产不应关闭——关闭即重新引入"重启误杀在飞实例"的竞态。
+func (s *Scheduler) SetReaperWarmup(d time.Duration) {
+	s.warmup = d
+}
+
+// inWarmup 是否处于 reaper 启动宽限窗口(warmup 内 stallReason 跳过 worker 失联判定)。
+func (s *Scheduler) inWarmup(now time.Time) bool {
+	return s.warmup > 0 && now.Sub(s.startedAt) < s.warmup
 }
 
 // Start 启动四个后台循环(定时调度 / 手动派发 / reaper / retry),全部纳入 wg 跟踪。reg 为 reaper
@@ -99,13 +119,35 @@ func (s *Scheduler) stopTimers() {
 	s.timerMu.Unlock()
 }
 
-// goTrack 启动一个受 wg 跟踪的 goroutine,供优雅关闭统一等待(含派发子协程 execute/runManualHeld/retry)。
+// goTrack 启动一个受 wg 跟踪的后台 goroutine,带 panic 自愈:fn panic 时 recover+记录+短暂退避后重启 fn,
+// 防单次异常数据/第三方驱动 bug 导致调度/reaper/retry 循环永久停止(静默停摆比崩进程更危险)。
+// fn 正常返回(ctx 取消)则退出。派发子协程(execute/runManualHeld/retryInstance)自带 recover 且正常 return,
+// 不会触发重启(它们是一次性任务,panic 已被自身 recover 兜底)。
 func (s *Scheduler) goTrack(fn func()) {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		fn()
+		for {
+			if s.runTracked(fn) {
+				return // fn 正常结束(ctx 取消);panic 路径 runTracked 返回 false,for 循环重启
+			}
+		}
 	}()
+}
+
+// runTracked 执行 fn:正常返回 true;panic 时 recover+log+1s 退避后返回 false(供 goTrack 决定是否重启)。
+// 退避防 panic 死循环刷屏;优雅关闭时正常路径不经此 sleep(fn 随 ctx 取消正常返回)。
+func (s *Scheduler) runTracked(fn func()) (ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.log.Error("后台循环 panic,1s 后重启(防调度/reaper/retry 静默停止)", "panic", r)
+			time.Sleep(time.Second)
+		} else {
+			ok = true
+		}
+	}()
+	fn()
+	return
 }
 
 // cbBuild 返回构造回调的闭包(供 *WithCallback 在 tx 内用最新行构造 payload);回调未启用时返回 nil,
@@ -407,7 +449,7 @@ func (s *Scheduler) popPending() (manualItem, bool) {
 // 按 priority desc / created_at asc 重建 seq 入队,保证恢复后顺序稳定。
 // 应在 main 启动、RecoverStaleActive 之后、RunManualDispatcher 之前调用。
 func (s *Scheduler) RecoverQueued() error {
-	list, err := s.store.Instance.ListQueued()
+	list, err := s.store.Instance.ListQueued(5000)
 	if err != nil {
 		return err
 	}
@@ -434,6 +476,9 @@ func (s *Scheduler) RecoverQueued() error {
 	}
 	if n := s.pq.Len(); n > 0 {
 		s.log.Info("已恢复重启前排队的实例", "count", n)
+	}
+	if len(list) >= 5000 {
+		s.log.Warn("重启前 queued 实例可能超 5000(仅恢复前 5000 防内存压力),剩余下次重启恢复;建议排查并发积压", "recovered", len(list))
 	}
 	return nil
 }
@@ -664,7 +709,11 @@ func (s *Scheduler) stallReason(ins *domain.Instance, job *domain.Job, reg *work
 		// (RecoverStaleActive 在重启时接管,此时 TriggerTime 已远超窗口),反而延迟真正卡死实例的检测。
 		return "实例缺少 worker 绑定"
 	}
-	if reg != nil && !reg.IsOnline(ins.AppID, ins.WorkerAddress) {
+	// warmup 守卫:服务重启后 workerreg 是空的,worker 需一个心跳周期才重新注册——此期间 IsOnline 必为
+	// false,若直接判失联会误杀所有"重启前在飞"的正常实例(worker 迟到 success 被终态守护拒绝 → 重复执行)。
+	// warmup 内跳过"worker 失联"判定,仅保留下面的执行超时(TimeoutSec)判定。warmup 由配置
+	// worker.warmup_seconds 控制(默认 30s ≥ 典型 10s 心跳 + 余量);零值=未启用(测试/旧路径)。
+	if !s.inWarmup(now) && reg != nil && !reg.IsOnline(ins.AppID, ins.WorkerAddress) {
 		return "worker 失联(心跳超时)"
 	}
 	if job.TimeoutSec > 0 && ins.StartTime != nil {

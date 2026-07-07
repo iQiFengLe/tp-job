@@ -12,7 +12,7 @@ const (
 	StatusRunning        = "running"         // 运行中(worker 上报)
 	StatusSuccess        = "success"         // 成功
 	StatusFailed         = "failed"          // 失败(含执行超时,result 注明)
-	StatusSkipped        = "skipped"         // 跳过(排队等待超时)
+	StatusSkipped        = "skipped"         // 跳过(排队等待超时;⚠ 当前未实现,预留——无代码路径产出此状态)
 	StatusCanceled       = "canceled"        // 取消
 	StatusStopped        = "stopped"         // 手动取消
 )
