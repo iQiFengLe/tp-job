@@ -123,21 +123,54 @@ func forceStatusFields(status, result string) map[string]any {
 	if domain.StatusTerminal(status) {
 		fields["end_time"] = time.Now()
 	} else {
-		fields["end_time"] = nil // 复活:清空 end_time
+		fields["end_time"] = nil      // 复活:清空 end_time
+		fields["duration_ms"] = 0     // 复活:清空旧耗时(重新执行后由终态写入重算)
 	}
 	return fields
 }
 
+// durationMillisFor 读实例当前 start_time/trigger_time,算 now 相对的执行耗时(毫秒),供终态写入注入。
+// start_time 派发时设置;为空(异常/迁移脏数据)退到 trigger_time;负值兜底 0。纯 Go 算——项目 sqlite/mysql
+// 双驱动,不能用 julianday/TIMESTAMPDIFF 等方言函数。
+func (s InstanceStore) durationMillisFor(db *gorm.DB, id int64, now time.Time) int64 {
+	var cur domain.Instance
+	if err := db.Select("start_time, trigger_time").Where("id = ?", id).First(&cur).Error; err != nil {
+		return 0
+	}
+	base := cur.TriggerTime
+	if cur.StartTime != nil {
+		base = *cur.StartTime
+	}
+	if d := now.Sub(base).Milliseconds(); d > 0 {
+		return d
+	}
+	return 0
+}
+
 // UpdateResult 写入状态/结果(终态不可回退守护:仅当前非终态时才更新,worker 乱序/迟到上报不覆盖既有终态)。
+// 终态顺带写 duration_ms:resultFields 已置 end_time=now,此处取该 now 算执行耗时一并写入。
 func (s InstanceStore) UpdateResult(id int64, status, result string) error {
+	fields := resultFields(status, result)
+	if domain.StatusTerminal(status) {
+		if now, ok := fields["end_time"].(time.Time); ok {
+			fields["duration_ms"] = s.durationMillisFor(s.db, id, now)
+		}
+	}
 	return s.db.Model(&domain.Instance{}).
 		Where("id = ? AND status NOT IN ?", id, domain.TerminalStatuses()).
-		Updates(resultFields(status, result)).Error
+		Updates(fields).Error
 }
 
 // SetStatus 强制写入状态(管理员纠错,不守护终态,可把终态实例复活或改终态)。
+// 终态写 duration_ms(同 UpdateResult);非终态(复活)forceStatusFields 已清 duration。
 func (s InstanceStore) SetStatus(id int64, status, result string) error {
-	return s.db.Model(&domain.Instance{}).Where("id = ?", id).Updates(forceStatusFields(status, result)).Error
+	fields := forceStatusFields(status, result)
+	if domain.StatusTerminal(status) {
+		if now, ok := fields["end_time"].(time.Time); ok {
+			fields["duration_ms"] = s.durationMillisFor(s.db, id, now)
+		}
+	}
+	return s.db.Model(&domain.Instance{}).Where("id = ?", id).Updates(fields).Error
 }
 
 // SetNextRetryTime 设定 DB 驱动重试到点时间。
@@ -306,9 +339,15 @@ func (s InstanceStore) MarkDispatchedWithCallback(id int64, workerAddress string
 func (s InstanceStore) UpdateResultWithCallback(id int64, status, result string, build func(latest *domain.Instance) *domain.Callback) (int64, error) {
 	var rows int64
 	err := s.db.Transaction(func(tx *gorm.DB) error {
+		fields := resultFields(status, result)
+		if domain.StatusTerminal(status) {
+			if now, ok := fields["end_time"].(time.Time); ok {
+				fields["duration_ms"] = s.durationMillisFor(tx, id, now)
+			}
+		}
 		res := tx.Model(&domain.Instance{}).
 			Where("id = ? AND status NOT IN ?", id, domain.TerminalStatuses()).
-			Updates(resultFields(status, result))
+			Updates(fields)
 		if res.Error != nil {
 			return res.Error
 		}
@@ -380,7 +419,13 @@ func (s InstanceStore) SetStatusWithCallback(id int64, status, result string, bu
 	}
 	var rows int64
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		res := tx.Model(&domain.Instance{}).Where("id = ?", id).Updates(forceStatusFields(status, result))
+		fields := forceStatusFields(status, result)
+		if domain.StatusTerminal(status) {
+			if now, ok := fields["end_time"].(time.Time); ok {
+				fields["duration_ms"] = s.durationMillisFor(tx, id, now)
+			}
+		}
+		res := tx.Model(&domain.Instance{}).Where("id = ?", id).Updates(fields)
 		if res.Error != nil {
 			return res.Error
 		}
