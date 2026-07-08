@@ -3,7 +3,7 @@ import { Button, InputNumber, Select, Space, Table, Tag, Tooltip, Typography } f
 import type { ColumnsType } from 'antd/es/table';
 import { useEffect, useState } from 'react';
 import { api } from '../api';
-import { PAGE_SIZE, formatTime, statusColor, statusLabel, statusOptions, triggerTypeLabel } from '../lib';
+import { PAGE_SIZE, formatDuration, formatTime, statusColor, statusLabel, statusOptions, triggerTypeLabel } from '../lib';
 import { scheduleKindOptions } from '../schedule';
 import type { InstanceView } from '../types';
 import AppGate from './AppGate';
@@ -73,7 +73,7 @@ export default function InstancesView(props: { appId?: number; onError: (error: 
       ),
     },
     { title: 'Worker', dataIndex: 'worker_address', width: 180, render: (v) => v || '-' },
-    { title: '耗时', dataIndex: 'duration_ms', width: 100, render: (v) => (v ? `${v}ms` : '-') },
+    { title: '耗时', dataIndex: 'duration_ms', width: 100, render: formatDuration },
     { title: '触发时间', dataIndex: 'trigger_time', render: formatTime, width: 180 },
     {
       title: '操作',

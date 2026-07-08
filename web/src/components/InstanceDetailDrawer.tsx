@@ -1,21 +1,10 @@
 import { FileTextOutlined } from '@ant-design/icons';
 import { Button, Descriptions, Drawer, Tag, Typography } from 'antd';
-import { formatTime, statusColor, statusLabel, triggerTypeLabel } from '../lib';
+import { formatDuration, formatTime, statusColor, statusLabel, triggerTypeLabel } from '../lib';
 import { scheduleKindOptions } from '../schedule';
 import type { InstanceView } from '../types';
 
 const { Text } = Typography;
-
-// 耗时友好化:<1s 显示 ms,>=60s 显示 m+s,其余 1 位小数秒。
-function formatDuration(ms?: number) {
-  if (!ms) return '-';
-  if (ms < 1000) return `${ms}ms`;
-  const sec = ms / 1000;
-  if (sec < 60) return `${sec.toFixed(1)}s`;
-  const m = Math.floor(sec / 60);
-  const s = Math.round(sec % 60);
-  return `${m}m${s}s`;
-}
 
 export default function InstanceDetailDrawer(props: {
   instance?: InstanceView;

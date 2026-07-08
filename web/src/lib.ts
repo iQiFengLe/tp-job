@@ -42,6 +42,17 @@ export function formatTime(value?: string | number) {
   return value ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : '-';
 }
 
+// 耗时友好化:0/缺省→"-";<1s 显示 ms;>=60s 显示 m+s;其余 1 位小数秒。
+export function formatDuration(ms?: number) {
+  if (!ms) return '-';
+  if (ms < 1000) return `${ms}ms`;
+  const sec = ms / 1000;
+  if (sec < 60) return `${sec.toFixed(1)}s`;
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec % 60);
+  return `${m}m${s}s`;
+}
+
 // 紧凑化:剔除 undefined/null/'' 字段,适配部分更新。
 export function compactObject<T extends Record<string, unknown>>(values: T) {
   return Object.fromEntries(
