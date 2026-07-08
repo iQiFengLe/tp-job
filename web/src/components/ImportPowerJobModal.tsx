@@ -3,7 +3,7 @@ import {App as AntApp, Alert, Button, Form, Input, Modal, Space, Statistic, Tabl
 import type {ColumnsType} from 'antd/es/table';
 import {useState} from 'react';
 import {api} from '../api';
-import type {ImportPowerJobItem, ImportPowerJobResp} from '../types';
+import type {ImportPowerJobItem, ImportPowerJobReq, ImportPowerJobResp} from '../types';
 
 const KIND_LABEL: Record<string, string> = {
     cron: 'CRON',
@@ -26,10 +26,14 @@ export default function ImportPowerJobModal(props: {
     const [step, setStep] = useState<'form' | 'preview'>('form');
     const [loading, setLoading] = useState(false);
     const [result, setResult] = useState<ImportPowerJobResp>();
+    // 缓存预览时的请求参数:确认导入时 Form 已卸载(preserve={false} 清空字段),
+    // 再 validateFields 拿不到值会触发 undefined.trim() 报错;且预览后表单不可改,确认本就该用同一份参数。
+    const [reqValues, setReqValues] = useState<ImportPowerJobReq>();
 
     const reset = () => {
         setStep('form');
         setResult(undefined);
+        setReqValues(undefined);
         (form as FormInstance).resetFields();
     };
     const close = () => {
@@ -39,16 +43,26 @@ export default function ImportPowerJobModal(props: {
 
     const callApi = (dryRun: boolean) => async () => {
         if (!props.appId) return;
-        const v = await form.validateFields();
-        setLoading(true);
-        try {
-            const resp = await api.jobs.importPowerJob(props.appId, {
+        // 预览:从 Form 取值并 trim 后缓存(Form 此时尚挂载)。确认导入:复用预览参数——此时 Form 已卸载,
+        // preserve={false} 清空了字段,validateFields 返回 undefined 字段,.trim() 报错。
+        let req: ImportPowerJobReq;
+        if (dryRun) {
+            const v = await form.validateFields();
+            req = {
                 server_address: v.server_address.trim(),
                 app_name: v.app_name.trim(),
                 password: v.password?.trim() || undefined,
                 token: v.token?.trim() || undefined,
-                dry_run: dryRun,
-            });
+                dry_run: true,
+            };
+            setReqValues(req);
+        } else {
+            if (!reqValues) return;
+            req = {...reqValues, dry_run: false};
+        }
+        setLoading(true);
+        try {
+            const resp = await api.jobs.importPowerJob(props.appId, req);
             if (dryRun) {
                 setResult(resp);
                 setStep('preview');
