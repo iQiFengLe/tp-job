@@ -638,3 +638,35 @@ func TestDispatchAbortsOnConcurrentTerminal(t *testing.T) {
 		t.Errorf("终态实例不应 scheduleRetry, next_retry_time 应为 nil, got %v", got.NextRetryTime)
 	}
 }
+
+func TestRetryBackoff(t *testing.T) {
+	cases := []struct {
+		intervalSec int
+		retryIndex  int
+		want        time.Duration
+	}{
+		// 默认 base=1s(IntervalSec=0 兜底):1s/2s/4s/8s/16s...
+		{0, 0, 1 * time.Second},
+		{0, 1, 2 * time.Second},
+		{0, 2, 4 * time.Second},
+		{0, 3, 8 * time.Second},
+		{0, 4, 16 * time.Second},
+		// 自定义 base:10s/20s/40s/80s...
+		{10, 0, 10 * time.Second},
+		{10, 1, 20 * time.Second},
+		{10, 2, 40 * time.Second},
+		{10, 3, 80 * time.Second},
+		// 大 retryIndex clamp 到 30min(默认上限)
+		{1, 100, 30 * time.Minute},
+		{10, 100, 30 * time.Minute},
+		// base 超过默认上限:以 base 为上限,不压缩用户意图(不再翻倍)
+		{3600, 0, time.Hour},
+		{3600, 5, time.Hour},
+	}
+	for _, c := range cases {
+		got := retryBackoff(c.intervalSec, c.retryIndex)
+		if got != c.want {
+			t.Errorf("retryBackoff(%d,%d)=%v, want %v", c.intervalSec, c.retryIndex, got, c.want)
+		}
+	}
+}

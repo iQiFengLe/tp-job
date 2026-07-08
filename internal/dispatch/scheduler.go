@@ -831,13 +831,37 @@ func (s *Scheduler) scheduleRetry(ins *domain.Instance, job *domain.Job) {
 	if job.RetryCount <= 0 || ins.RetryIndex >= job.RetryCount {
 		return
 	}
-	interval := time.Duration(job.RetryIntervalSec) * time.Second
-	if interval < time.Second {
-		interval = time.Second
-	}
+	// 指数退避:以 RetryIntervalSec 为基数每次翻倍(1s→2s→4s...),封顶 30min。缓解网络抖动/worker
+	// 短暂不可达下短时间内把 RetryCount 用尽导致最终失败——retryIndex 越大间隔越长,给恢复留时间。
+	interval := retryBackoff(job.RetryIntervalSec, ins.RetryIndex)
 	if err := s.store.Instance.SetNextRetryTime(ins.ID, time.Now().Add(interval)); err != nil {
 		s.log.Error("设定重试时间失败", "instance_id", ins.ID, "err", err)
 	}
+}
+
+// retryBackoff 计算实例重试退避间隔:base * 2^retryIndex,clamp 到 [1s, maxBackoff]。
+// base 取 retryIntervalSec(默认 0→1s);用循环翻倍而非位移,避免大 retryIndex 下 int64 溢出。
+// retryIndex 为当前实例已重试次数(即将创建第 retryIndex+1 次重试)。
+// 例:base=10s → 第1次重试等 10s,第2次 20s,第3次 40s...;base=1s → 1s/2s/4s/8s...
+// maxBackoff 默认 30min;用户配的 base 超过此值时以 base 为上限(不压缩用户意图)。
+func retryBackoff(retryIntervalSec, retryIndex int) time.Duration {
+	const defaultMaxBackoff = 30 * time.Minute
+	base := time.Duration(retryIntervalSec) * time.Second
+	if base < time.Second {
+		base = time.Second
+	}
+	maxBackoff := defaultMaxBackoff
+	if base > maxBackoff {
+		maxBackoff = base
+	}
+	d := base
+	for i := 0; i < retryIndex && d < maxBackoff; i++ {
+		d *= 2
+	}
+	if d <= 0 || d > maxBackoff {
+		d = maxBackoff
+	}
+	return d
 }
 
 // dispatchToWorker 执行「选后即绑」派发:PickWorker → MarkDispatched → Send。

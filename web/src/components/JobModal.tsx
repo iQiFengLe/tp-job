@@ -88,7 +88,7 @@ export default function JobModal(props: {
           <Form.Item name="retry_count" label="重试次数">
             <InputNumber min={0} className="full" />
           </Form.Item>
-          <Form.Item name="retry_interval_sec" label="重试间隔秒">
+          <Form.Item name="retry_interval_sec" label="重试间隔秒" tooltip="退避基数:首次重试等 N 秒,此后每次翻倍封顶 30min;0=默认 1s">
             <InputNumber min={0} className="full" />
           </Form.Item>
           <Form.Item name="default_priority" label="默认优先级">
