@@ -63,6 +63,9 @@ export default function JobModal(props: {
             </>
           )}
         </div>
+        <Form.Item name="description" label="任务描述">
+          <Input.TextArea rows={2} placeholder="可选,任务的说明备注" />
+        </Form.Item>
         <Form.Item name="job_params" label="任务参数(job_params)">
           <Input.TextArea rows={3} placeholder="随每次执行下发的参数字符串" />
         </Form.Item>

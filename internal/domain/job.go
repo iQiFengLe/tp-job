@@ -9,7 +9,8 @@ import "time"
 type Job struct {
 	ID    int64  `gorm:"primaryKey;autoIncrement" json:"id"`
 	AppID int64  `gorm:"index:idx_app_job;uniqueIndex:idx_job_from,priority:1;not null" json:"app_id"` // int 外键
-	Name  string `gorm:"type:varchar(128);not null" json:"name"`
+	Name        string `gorm:"type:varchar(128);not null" json:"name"`
+	Description string `gorm:"type:text" json:"description,omitempty"` // 任务描述(可选);PowerJob 同步自 jobDescription,自建可手填
 
 	// —— 执行(当前唯一 http 派发;字段保留供未来扩展)——
 	ExecuteType string `gorm:"type:varchar(16);not null;default:http" json:"execute_type"` // http

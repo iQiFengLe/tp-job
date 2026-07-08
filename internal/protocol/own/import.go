@@ -78,6 +78,7 @@ func convertPJJob(pj powerjob.JobInfoDTO, appID int64, serverKey string) *domain
 	return &domain.Job{
 		AppID:          appID,
 		Name:           name,
+		Description:    pj.JobDescription,
 		ExecuteType:    "http",
 		JobParams:      pj.JobParams,
 		Tag:            pj.Tag,
@@ -107,6 +108,7 @@ func isAutoKind(kind string) bool {
 func jobToUpdateFields(j *domain.Job) map[string]any {
 	return map[string]any{
 		"name":            j.Name,
+		"description":     j.Description,
 		"job_params":      j.JobParams,
 		"tag":             j.Tag,
 		"timeout_sec":     j.TimeoutSec,

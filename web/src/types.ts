@@ -83,6 +83,7 @@ export interface JobView {
   id: number;
   app_id: number;
   name: string;
+  description?: string;
   execute_type?: string;
   job_params?: string;
   tag?: string;

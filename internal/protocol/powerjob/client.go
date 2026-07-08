@@ -95,6 +95,7 @@ func (c *Client) FetchJobs(ctx context.Context, addr, appName, password, token s
 type fetchJobDTO struct {
 	ID                 int64           `json:"id"`
 	JobName            string          `json:"jobName"`
+	JobDescription     string          `json:"jobDescription,omitempty"`
 	JobParams          string          `json:"jobParams,omitempty"`
 	TimeExpressionType int             `json:"timeExpressionType,omitempty"`
 	TimeExpression     string          `json:"timeExpression,omitempty"`
@@ -113,7 +114,7 @@ func toJobInfoDTOs(raws []fetchJobDTO) []JobInfoDTO {
 	out := make([]JobInfoDTO, len(raws))
 	for i, r := range raws {
 		out[i] = JobInfoDTO{
-			ID: r.ID, JobName: r.JobName, JobParams: r.JobParams,
+			ID: r.ID, JobName: r.JobName, JobDescription: r.JobDescription, JobParams: r.JobParams,
 			TimeExpressionType: r.TimeExpressionType, TimeExpression: r.TimeExpression,
 			Concurrency: r.Concurrency, InstanceTimeLimit: r.InstanceTimeLimit,
 			InstanceRetryNum: r.InstanceRetryNum, Tag: r.Tag, Status: r.Status,

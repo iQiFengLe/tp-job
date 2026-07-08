@@ -39,6 +39,7 @@ type AppView struct {
 
 type CreateJobReq struct {
 	Name             string `json:"name" binding:"required"`
+	Description      string `json:"description"`
 	ExecuteType      string `json:"execute_type"`           // 留空默认 http
 	JobParams        string `json:"job_params"`
 	Tag              string `json:"tag"`
@@ -58,6 +59,7 @@ type CreateJobReq struct {
 
 type UpdateJobReq struct {
 	Name             *string `json:"name"`
+	Description      *string `json:"description"`
 	ExecuteType      *string `json:"execute_type"`
 	JobParams        *string `json:"job_params"`
 	Tag              *string `json:"tag"`
@@ -79,6 +81,7 @@ type JobView struct {
 	ID      int64  `json:"id"`
 	AppID   int64  `json:"app_id"`
 	Name    string `json:"name"`
+	Description string `json:"description,omitempty"`
 
 	ExecuteType string `json:"execute_type"`
 	JobParams   string `json:"job_params,omitempty"`
@@ -199,7 +202,7 @@ func AppToView(a *domain.App) AppView {
 
 func JobToView(j *domain.Job) JobView {
 	return JobView{
-		ID: j.ID, AppID: j.AppID, Name: j.Name,
+		ID: j.ID, AppID: j.AppID, Name: j.Name, Description: j.Description,
 		ExecuteType: j.ExecuteType, JobParams: j.JobParams, Tag: j.Tag, TimeoutSec: j.TimeoutSec,
 		ScheduleKind: j.ScheduleKind, ScheduleExpr: j.ScheduleExpr, NextRunTime: j.NextRunTime,
 		StartTime: timeToMs(j.StartTime), EndTime: timeToMs(j.EndTime),
@@ -246,7 +249,7 @@ func CreateJobReqToJob(appID int64, req CreateJobReq) (*domain.Job, error) {
 		maxWait = 0
 	}
 	return &domain.Job{
-		AppID: appID, Name: req.Name,
+		AppID: appID, Name: req.Name, Description: req.Description,
 		ExecuteType: execType, JobParams: req.JobParams, Tag: req.Tag, TimeoutSec: req.TimeoutSec,
 		ScheduleKind: req.ScheduleKind, ScheduleExpr: req.ScheduleExpr,
 		StartTime: msToTimePtr(req.StartTime), EndTime: msToTimePtr(req.EndTime),
@@ -262,6 +265,9 @@ func UpdateJobReqToFields(req UpdateJobReq) map[string]any {
 	f := map[string]any{}
 	if req.Name != nil {
 		f["name"] = *req.Name
+	}
+	if req.Description != nil {
+		f["description"] = *req.Description
 	}
 	if req.ExecuteType != nil {
 		f["execute_type"] = *req.ExecuteType

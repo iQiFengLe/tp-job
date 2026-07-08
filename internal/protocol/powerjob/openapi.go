@@ -73,6 +73,7 @@ func PowerResultFail(msg string) PowerResultDTO {
 type JobInfoDTO struct {
 	ID                 int64  `json:"id"`
 	JobName            string `json:"jobName"`
+	JobDescription     string `json:"jobDescription,omitempty"`
 	AppID              int64  `json:"appId"`
 	JobParams          string `json:"jobParams,omitempty"`
 	TimeExpressionType int    `json:"timeExpressionType,omitempty"` // 1 API/2 CRON/3 FIX_RATE/4 FIX_DELAY
@@ -115,6 +116,7 @@ type InstanceInfoDTO struct {
 type SaveJobReq struct {
 	ID                 *int64  `json:"id,omitempty"`
 	JobName            *string `json:"jobName,omitempty"`
+	JobDescription     *string `json:"jobDescription,omitempty"`
 	AppID              *int64  `json:"appId,omitempty"`
 	JobParams          *string `json:"jobParams,omitempty"`
 	TimeExpressionType *int    `json:"timeExpressionType,omitempty"`
@@ -213,7 +215,7 @@ func jobToDTO(j *domain.Job) JobInfoDTO {
 		status = 1
 	}
 	return JobInfoDTO{
-		ID: j.ID, JobName: j.Name, AppID: j.AppID, JobParams: j.JobParams,
+		ID: j.ID, JobName: j.Name, JobDescription: j.Description, AppID: j.AppID, JobParams: j.JobParams,
 		TimeExpressionType: scheduleKindToWire(j.ScheduleKind),
 		TimeExpression:     j.ScheduleExpr,
 		ExecuteType:        1, ProcessorType: 1,
@@ -406,6 +408,9 @@ func (d OpenApiDeps) saveJob(c *gin.Context) {
 		if r.JobParams != nil {
 			fields["job_params"] = *r.JobParams
 		}
+		if r.JobDescription != nil {
+			fields["description"] = *r.JobDescription
+		}
 		if r.TimeExpressionType != nil {
 			fields["schedule_kind"] = wireToScheduleKind(*r.TimeExpressionType)
 		}
@@ -455,6 +460,7 @@ func (d OpenApiDeps) saveJob(c *gin.Context) {
 	job := &domain.Job{
 		AppID: appID, Name: name, ExecuteType: "http",
 		JobParams:      strOrDefault(r.JobParams),
+		Description:    strOrDefault(r.JobDescription),
 		Tag:            strOrDefault(r.Tag),
 		TimeoutSec:     int(int64Val(r.InstanceTimeLimit) / 1000),
 		ScheduleKind:   wireToScheduleKind(intVal(r.TimeExpressionType)),

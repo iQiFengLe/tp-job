@@ -14,6 +14,9 @@ export default function JobDetailDrawer(props: { job?: JobView; onClose: () => v
         <Descriptions column={1} bordered size="medium">
           <Descriptions.Item label="ID">{job.id}</Descriptions.Item>
           <Descriptions.Item label="名称">{job.name}</Descriptions.Item>
+          <Descriptions.Item label="任务描述">
+            {job.description ? <Text style={{ whiteSpace: 'pre-wrap' }}>{job.description}</Text> : '-'}
+          </Descriptions.Item>
           <Descriptions.Item label="调度类型">
             <Tag style={{ fontWeight: 500 }}>{kindLabel}</Tag>
           </Descriptions.Item>
