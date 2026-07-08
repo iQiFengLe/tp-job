@@ -339,11 +339,10 @@ func (d Deps) getInstance(c *gin.Context) {
 }
 
 func (d Deps) instanceLogs(c *gin.Context) {
-	group := c.Query("group") == "true" || c.Query("group") == "1"
 	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "500"))
 	lines, total, err := d.Instances.LogsInApp(paramInt64(c, "appId"), paramInt64(c, "iid"), dservice.LogQuery{
-		Group: group, Offset: offset, Limit: limit,
+		Offset: offset, Limit: limit,
 	})
 	if err != nil {
 		fail(c, notFoundStatus(err), err.Error())

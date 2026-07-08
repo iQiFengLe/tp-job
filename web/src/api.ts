@@ -139,7 +139,7 @@ export const api = {
     ) => request<PageResult<InstanceView>>(`/api/apps/${appId}/instances${qs(params)}`),
     get: (appId: number, iid: number) =>
       request<InstanceView>(`/api/apps/${appId}/instances/${iid}`),
-    logs: (appId: number, iid: number, params: { group?: boolean; offset?: number; limit?: number }) =>
+    logs: (appId: number, iid: number, params: { offset?: number; limit?: number }) =>
       request<LogResult>(`/api/apps/${appId}/instances/${iid}/logs${qs(params)}`),
   },
 

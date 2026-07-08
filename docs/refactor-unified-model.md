@@ -158,7 +158,7 @@ type InstanceLogger interface {
 }
 ```
 - per-instance `sync.Mutex` 保证多 goroutine 写有序;按 mtime + `log.instance_retention_days` 清理。
-- `GET .../instances/:iid/logs` 读单文件;`?group=1` 列同 root 全部按 instanceID 排序拼接。
+- `GET .../instances/:iid/logs` 读单实例日志文件(按行 offset/limit 分页);不提供程序内聚合——同链路串联靠文件名格式 `{id}_{root}` 由 ssh/外部程序按名分析。
 
 ---
 
@@ -358,7 +358,7 @@ internal/
 - [ ] `protocol/own`(/api/*):translator + dto
 - [ ] `protocol/worker`:`/worker/heartbeat`(含 systemMetrics/tags)、`/worker/instances/:iid/status`、`/logs`(无 token)
 - [ ] `protocol/powerjob`:`/server/*`(assert/acquire/heartbeat/reportStatus/reportLog)+ `/api/poweradmin/*`;int↔string 状态映射 + runJob body 翻译
-- [ ] `/api/.../instances/:iid/logs` 改读 `InstanceLogger.Read`(`?group=1` 同 root)
+- [ ] `/api/.../instances/:iid/logs` 改读 `InstanceLogger.Read`(单实例,offset/limit 分页)
 
 ### 阶段 4:管理端账户/登录
 - [x] 管理员账户 admin_user 表(seed admin/admin123,Web 可改;已迁出 config/env)+ release 防呆(config.release.yaml)

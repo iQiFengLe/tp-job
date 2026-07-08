@@ -42,7 +42,7 @@ func TestReportStatusWritesStatusLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	read := func() []string {
-		l, _, _ := il.Read(ins.AppID, ins.ID, domain.RootOf(ins), instancelog.LogQuery{})
+		l, _, _ := il.Read(ins.AppID, ins.ID, ins.RootInstanceID, instancelog.LogQuery{})
 		return l
 	}
 

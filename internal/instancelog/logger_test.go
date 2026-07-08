@@ -1,7 +1,6 @@
 package instancelog
 
 import (
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -48,28 +47,6 @@ func TestConcurrentAppend(t *testing.T) {
 	}
 	if total != n {
 		t.Fatalf("并发写应得 %d 行, got %d", n, total)
-	}
-}
-
-// ReadGroup:同一次触发的首次+重试聚合(按 instanceID 排序),不含其他触发的噪音。
-func TestReadGroup(t *testing.T) {
-	l := New(t.TempDir(), 0)
-	// 触发 A:首次 id=5(root=0),重试 id=8(root=5)
-	l.Append(1, 5, 0, LogEntry{Kind: "CREATE", Message: "first"})
-	l.Append(1, 8, 5, LogEntry{Kind: "CREATE", Message: "retry1"})
-	// 触发 B(噪音):id=9(root=0)
-	l.Append(1, 9, 0, LogEntry{Kind: "CREATE", Message: "other"})
-
-	lines, total, err := l.ReadGroup(1, 5, LogQuery{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if total != 2 {
-		t.Fatalf("root=5 应聚合首次+重试共 2 行, got %d: %v", total, lines)
-	}
-	// 首次(id=5)在重试(id=8)前
-	if !strings.Contains(lines[0], "first") || !strings.Contains(lines[1], "retry1") {
-		t.Fatalf("应按 instanceID 排序(首次在前), got %v", lines)
 	}
 }
 

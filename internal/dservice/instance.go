@@ -210,23 +210,23 @@ func (s *InstanceService) GetInApp(appID, id int64) (*domain.Instance, error) {
 
 // LogQuery 日志读取参数。
 type LogQuery struct {
-	Group  bool // true:聚合同 root 全部(含重试);false:仅本实例
 	Offset int
 	Limit  int
 }
 
-// Logs 读实例日志文件。group=true 时按 instanceID 排序聚合同 root 全部。
+// Logs 读实例日志文件(按行,带 offset/limit 分页)。
+//
+// 文件名 {instanceID}_{rootInstanceID}.log 由 dispatch/worker 写入(首次实例 rootInstanceID=0),
+// 读路径须与之对齐——传 ins.RootInstanceID,而非 domain.RootOf(后者是给 callback payload 算
+// "逻辑链首"的,首次实例会回退到 ins.ID,落到不存在的 {N}_{N} 文件)。同链路串联只靠文件名格式
+// (ssh/外部程序按名分析),程序内不提供聚合读取。
 func (s *InstanceService) Logs(id int64, q LogQuery) ([]string, int, error) {
 	ins, err := s.Get(id)
 	if err != nil {
 		return nil, 0, err
 	}
-	rootID := domain.RootOf(ins)
 	iq := instancelog.LogQuery{Offset: q.Offset, Limit: q.Limit}
-	if q.Group {
-		return s.il.ReadGroup(ins.AppID, rootID, iq)
-	}
-	return s.il.Read(ins.AppID, ins.ID, rootID, iq)
+	return s.il.Read(ins.AppID, ins.ID, ins.RootInstanceID, iq)
 }
 
 // LogsInApp 同 Logs,但先经 GetInApp 校验实例归属 app,防 app 角色越权读他人执行日志。
@@ -235,21 +235,17 @@ func (s *InstanceService) LogsInApp(appID, id int64, q LogQuery) ([]string, int,
 	if err != nil {
 		return nil, 0, err
 	}
-	rootID := domain.RootOf(ins)
 	iq := instancelog.LogQuery{Offset: q.Offset, Limit: q.Limit}
-	if q.Group {
-		return s.il.ReadGroup(ins.AppID, rootID, iq)
-	}
-	return s.il.Read(ins.AppID, ins.ID, rootID, iq)
+	return s.il.Read(ins.AppID, ins.ID, ins.RootInstanceID, iq)
 }
 
-// logStatus 写一条 STATUS 事件到实例日志文件。ins 提供 AppID/RootInstanceID 定位文件;
-// LogEntry 字段与 dispatch.Scheduler.appendLogRaw 一致(显式 Time 对齐)。
+// logStatus 写一条 STATUS 事件到实例日志文件。rootID 取 ins.RootInstanceID(与
+// dispatch.appendLog 写入侧对齐,见 Logs 注释);LogEntry 字段与 appendLogRaw 一致(显式 Time)。
 func (s *InstanceService) logStatus(ins *domain.Instance, level, msg string) {
 	if s.il == nil || ins == nil {
 		return
 	}
-	s.il.Append(ins.AppID, ins.ID, domain.RootOf(ins), instancelog.LogEntry{
+	s.il.Append(ins.AppID, ins.ID, ins.RootInstanceID, instancelog.LogEntry{
 		Time: time.Now(), Kind: "STATUS", Level: level, Message: msg,
 	})
 }

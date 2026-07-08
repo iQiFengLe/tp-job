@@ -197,7 +197,7 @@ CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags="-s -w" -o task-schedu
 | POST/GET/PUT/DELETE | `/api/apps/:appId/jobs[/:id]` | job CRUD |
 | POST | `/api/apps/:appId/jobs/:id/trigger` | 手动触发 |
 | GET | `/api/apps/:appId/instances` | 实例列表(按 job_id/status 过滤) |
-| GET | `/api/apps/:appId/instances/:iid/logs?group=1` | 实例日志(同 root 聚合) |
+| GET | `/api/apps/:appId/instances/:iid/logs` | 实例日志(按行 offset/limit 分页) |
 | GET | `/api/apps/:appId/workers` | 在线 worker 列表(读内存注册表) |
 | POST | `/worker/heartbeat`、`/worker/instances/:iid/{status,logs}` | http worker 协议(无鉴权) |
 | `*` | `/server/*` | PowerJob 协议(无鉴权) |

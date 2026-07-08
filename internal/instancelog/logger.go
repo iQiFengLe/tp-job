@@ -3,8 +3,10 @@
 //	{baseDir}/instances/{appID}/{instanceID}_{rootInstanceID}.log
 //
 // 调度事件(CREATE/SCHEDULE/DISPATCH/STATUS/RETRY/REAP)与 worker 上报日志混写同一文件,
-// 呈现一次执行的完整时间线。per-file mutex 保证多 goroutine 写有序。同 rootInstanceID 的
-// 多个文件(重试)按 instanceID 排序即可还原一次触发的完整过程。
+// 呈现一次执行的完整时间线。per-file mutex 保证多 goroutine 写有序。
+//
+// 文件名 {instanceID}_{rootInstanceID} 是面向 ssh/外部程序的可观测性契约:首次实例 root=0、
+// 重试挂链首 id,在文件系统按名即可还原一次触发的链路;程序内不再提供聚合读取(网页按单实例读)。
 package instancelog
 
 import (
@@ -12,8 +14,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -94,53 +94,6 @@ func (l *Logger) Read(appID, instanceID, rootID int64, q LogQuery) ([]string, in
 		return nil, 0, err
 	}
 	return paginate(splitLines(data), q)
-}
-
-// ReadGroup 列同"逻辑首次实例 id"的全部文件,按 instanceID 排序拼接:
-// 一次触发的完整时间线,含首次与所有重试。
-//
-// 首次实例文件名为 {rootID}_0.log(root=0),重试为 {instanceID}_{rootID}.log;
-// 故先单独读 {rootID}_0,再聚合 *_{rootID}。调用方传 rootID = (ins.RootInstanceID==0 ? ins.ID : ins.RootInstanceID)。
-func (l *Logger) ReadGroup(appID, rootID int64, q LogQuery) ([]string, int, error) {
-	var all []string
-	// 首次实例
-	if data, err := os.ReadFile(l.path(appID, rootID, 0)); err == nil {
-		all = append(all, splitLines(data)...)
-	}
-	// 重试实例:同 app 目录下 *_{rootID}.log
-	dir := filepath.Join(l.baseDir, fmt.Sprintf("%d", appID))
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return paginate(all, q)
-		}
-		return nil, 0, err
-	}
-	suffix := fmt.Sprintf("_%d.log", rootID)
-	type keyed struct {
-		id    int64
-		lines []string
-	}
-	var matched []keyed
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), suffix) {
-			continue
-		}
-		id, err := strconv.ParseInt(strings.TrimSuffix(e.Name(), suffix), 10, 64)
-		if err != nil || id == rootID {
-			continue // rootID_0 已单独读;且其 suffix 为 _0 不匹配 _{rootID},这里防御
-		}
-		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
-		if err != nil {
-			continue
-		}
-		matched = append(matched, keyed{id, splitLines(data)})
-	}
-	sort.Slice(matched, func(i, j int) bool { return matched[i].id < matched[j].id })
-	for _, m := range matched {
-		all = append(all, m.lines...)
-	}
-	return paginate(all, q)
 }
 
 // Sweep 删除 mtime 早于 retention 的实例日志,返回清理数。retention<=0 时 noop。

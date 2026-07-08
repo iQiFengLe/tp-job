@@ -45,9 +45,9 @@ export default function InstancesView(props: { appId?: number; onError: (error: 
   const openLogs = async (instance: InstanceView) => {
     if (!props.appId) return;
     try {
-      const data = await api.instances.logs(props.appId, instance.id, { group: true, limit: 500 });
+      const data = await api.instances.logs(props.appId, instance.id, { limit: 500 });
       setLogLines(data.lines || []);
-      setLogTitle(`实例 ${instance.id} 日志(同 root 聚合,共 ${data.total} 行)`);
+      setLogTitle(`实例 ${instance.id} 日志(共 ${data.total} 行)`);
       setLogOpen(true);
     } catch (error) {
       props.onError(error);
