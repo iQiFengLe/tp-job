@@ -209,5 +209,11 @@ export interface WorkerView {
   score?: number; // 选址分(高=空闲)
   cpu_load?: number;
   cpu_processors?: number;
+  jvm_max_memory?: number; // 最大内存(MB)
+  jvm_used_memory?: number; // 已用内存(MB)
+  jvm_memory_usage?: number; // 内存使用率 0~1
+  disk_total?: number; // 磁盘总量(GB)
+  disk_used?: number; // 磁盘已用(GB)
+  disk_usage?: number; // 磁盘使用率 0~1
   last_heartbeat: string;
 }

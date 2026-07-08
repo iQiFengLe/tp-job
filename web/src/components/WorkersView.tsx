@@ -56,6 +56,22 @@ export default function WorkersView(props: { appId?: number; onError: (error: un
       width: 130,
       render: (_, r) => (r.cpu_processors ? `${(r.cpu_load ?? 0).toFixed(2)} / ${r.cpu_processors}核` : '-'),
     },
+    {
+      title: '内存',
+      width: 170,
+      render: (_, r) =>
+        r.jvm_max_memory && r.jvm_max_memory > 0
+          ? `${(r.jvm_used_memory ?? 0).toFixed(0)} / ${r.jvm_max_memory.toFixed(0)} MB (${((r.jvm_memory_usage ?? 0) * 100).toFixed(0)}%)`
+          : '-',
+    },
+    {
+      title: '磁盘',
+      width: 170,
+      render: (_, r) =>
+        r.disk_total && r.disk_total > 0
+          ? `${(r.disk_used ?? 0).toFixed(1)} / ${r.disk_total.toFixed(1)} GB (${((r.disk_usage ?? 0) * 100).toFixed(0)}%)`
+          : '-',
+    },
     { title: '最后心跳', dataIndex: 'last_heartbeat', render: formatTime, width: 180 },
   ];
 
@@ -71,7 +87,7 @@ export default function WorkersView(props: { appId?: number; onError: (error: un
           刷新
         </Button>
       </div>
-      <Table rowKey="worker_address" columns={columns} dataSource={workers} loading={loading} pagination={false} scroll={{ x: 1000 }} />
+      <Table rowKey="worker_address" columns={columns} dataSource={workers} loading={loading} pagination={false} scroll={{ x: 1200 }} />
     </section>
   );
 }
