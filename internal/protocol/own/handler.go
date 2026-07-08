@@ -253,7 +253,7 @@ func (d Deps) triggerJob(c *gin.Context) {
 	appID := paramInt64(c, "appId")
 	id := paramInt64(c, "id")
 	priority, _ := strconv.Atoi(c.DefaultQuery("priority", "0"))
-	if err := d.Jobs.Trigger(appID, id, priority, c.Query("instance_params")); err != nil {
+	if err := d.Jobs.Trigger(appID, id, priority, c.Query("instance_params"), "api"); err != nil {
 		fail(c, notFoundStatus(err), err.Error())
 		return
 	}

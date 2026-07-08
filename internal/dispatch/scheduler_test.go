@@ -455,7 +455,7 @@ func TestSubmitManualDelayed(t *testing.T) {
 	job, _ := st.Job.Get(1, 1)
 
 	// delay=0:立即返回 ID 并入队
-	id, err := sch.SubmitManualDelayed(job, 0, "p", 0)
+	id, err := sch.SubmitManualDelayed(job, 0, "p", 0, "test")
 	if err != nil || id <= 0 {
 		t.Fatalf("应返回正 ID, err=%v", err)
 	}
@@ -464,7 +464,7 @@ func TestSubmitManualDelayed(t *testing.T) {
 	}
 
 	// delay>0:立即返回 ID + 落库 queued,但不立即入队
-	id2, err := sch.SubmitManualDelayed(job, 0, "p", time.Hour)
+	id2, err := sch.SubmitManualDelayed(job, 0, "p", time.Hour, "test")
 	if err != nil || id2 <= 0 {
 		t.Fatalf("应返回正 ID, err=%v", err)
 	}
@@ -477,7 +477,7 @@ func TestSubmitManualDelayed(t *testing.T) {
 	}
 
 	// 旧 SubmitManual 仍可用(返回 error)
-	if err := sch.SubmitManual(job, 0, "p"); err != nil {
+	if err := sch.SubmitManual(job, 0, "p", "test"); err != nil {
 		t.Fatalf("SubmitManual 应可用: %v", err)
 	}
 }
@@ -500,7 +500,7 @@ func TestCancelDelayedNotDispatched(t *testing.T) {
 	go sch.RunManualDispatcher(ctx)
 
 	// delay=200ms 入队;立即 cancel → 到点 runManualHeld 应查 DB 见终态、不派发
-	id, err := sch.SubmitManualDelayed(job, 0, "", 200*time.Millisecond)
+	id, err := sch.SubmitManualDelayed(job, 0, "", 200*time.Millisecond, "test")
 	if err != nil || id <= 0 {
 		t.Fatalf("SubmitManualDelayed 应返回正 ID, err=%v", err)
 	}

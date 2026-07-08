@@ -9,9 +9,11 @@
 package powerjob
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -552,8 +554,41 @@ func (d OpenApiDeps) setJobEnabled(c *gin.Context, enabled bool) {
 func (d OpenApiDeps) disableJob(c *gin.Context) { d.setJobEnabled(c, false) }
 func (d OpenApiDeps) enableJob(c *gin.Context)  { d.setJobEnabled(c, true) }
 
+// priorityFromInstanceParams 从 instanceParams(JSON 字符串)解析 priority 字段,作为本次触发的优先级。
+//
+// 业务背景:原版 PowerJob 的 runJob / runJob2 协议(RunJobRequest)不携带 priority,
+// 无法在协议层直接新增字段——加在表单/JSON 顶层会破坏与 PowerJob 客户端的兼容。
+// 为适配业务系统"触发指定任务时指定优先级"的能力,约定在 instanceParams 内以 JSON
+// 携带 priority(如 `{"priority":5, ...}`)间接传递,服务端在此解出后注入实例。
+//
+// 容错:instanceParams 为空、非合法 JSON、无 priority 字段或类型不可识别时,一律回退 0
+// ——与原触发行为完全一致,不影响存量调用与 PowerJob 兼容性。
+// 兼容数字与字符串两种 JSON 写法(对齐项目 flexInt64 的宽松语义)。
+func priorityFromInstanceParams(params string) int {
+	if params == "" {
+		return 0
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(params), &m); err != nil {
+		return 0
+	}
+	switch v := m["priority"].(type) {
+	case float64:
+		return int(v)
+	case string:
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return 0
+		}
+		return n
+	default:
+		return 0
+	}
+}
+
 // runJob POST /openApi/runJob(form:appId/jobId/instanceParams/delayMS|delay) → ResultDTO<Long>。
-// 兼容客户端 delayMS 与 PowerJob 官方 delay(均毫秒)。
+// 兼容客户端 delayMS 与 PowerJob 官方 delay(均毫秒)。instanceParams 可为 JSON 携带 priority
+// (见 priorityFromInstanceParams),其余仍按原样透传给 worker。
 func (d OpenApiDeps) runJob(c *gin.Context) {
 	if err := c.Request.ParseForm(); err != nil {
 		c.JSON(http.StatusOK, ResultFail("参数解析失败: " + err.Error()))
@@ -569,7 +604,8 @@ func (d OpenApiDeps) runJob(c *gin.Context) {
 	if delayMS == 0 {
 		delayMS = formInt64(c, "delay")
 	}
-	instanceID, err := d.Jobs.TriggerReturnInstance(appID, jobID, 0, c.PostForm("instanceParams"), delayMS)
+	instanceParams := c.PostForm("instanceParams")
+	instanceID, err := d.Jobs.TriggerReturnInstance(appID, jobID, priorityFromInstanceParams(instanceParams), instanceParams, delayMS, "openapi-runJob")
 	if err != nil {
 		c.JSON(http.StatusOK, ResultFail("触发失败: " + err.Error()))
 		return
@@ -578,6 +614,7 @@ func (d OpenApiDeps) runJob(c *gin.Context) {
 }
 
 // runJob2 POST /openApi/runJob2(JSON RunJobRequest) → PowerResultDTO<Long>。
+// instanceParams 可为 JSON 携带 priority(见 priorityFromInstanceParams),与 runJob 行为一致。
 func (d OpenApiDeps) runJob2(c *gin.Context) {
 	var r RunJobReq
 	if err := c.ShouldBindJSON(&r); err != nil {
@@ -597,7 +634,7 @@ func (d OpenApiDeps) runJob2(c *gin.Context) {
 	if r.Delay != nil {
 		delayMS = *r.Delay
 	}
-	instanceID, err := d.Jobs.TriggerReturnInstance(appID, jobID, 0, r.InstanceParams, delayMS)
+	instanceID, err := d.Jobs.TriggerReturnInstance(appID, jobID, priorityFromInstanceParams(r.InstanceParams), r.InstanceParams, delayMS, "openapi-runJob2")
 	if err != nil {
 		c.JSON(http.StatusOK, PowerResultFail("触发失败: " + err.Error()))
 		return

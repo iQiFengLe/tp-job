@@ -268,20 +268,20 @@ func (s *JobService) List(appID int64, page, size int) ([]domain.Job, int64, err
 
 // Trigger 手动触发:经 SubmitManual 入优先队列,受 MaxConcurrency 限制。
 // 落库失败时透传 SubmitManual 的 error,供调用方据实响应,而非空报 triggered。
-func (s *JobService) Trigger(appID, id int64, priority int, instanceParams string) error {
+func (s *JobService) Trigger(appID, id int64, priority int, instanceParams, source string) error {
 	job, err := s.Get(appID, id)
 	if err != nil {
 		return err
 	}
-	return s.sch.SubmitManual(job, priority, instanceParams)
+	return s.sch.SubmitManual(job, priority, instanceParams, source)
 }
 
 // TriggerReturnInstance 同 Trigger,但返回创建的实例 ID 并支持 delayMS 延迟(对齐 PowerJob OpenAPI
 // runJob):外部业务客户端需立即拿到 instanceId 追踪执行;delayMS>0 时立即返回 ID、延迟到点派发。
-func (s *JobService) TriggerReturnInstance(appID, id int64, priority int, instanceParams string, delayMS int64) (int64, error) {
+func (s *JobService) TriggerReturnInstance(appID, id int64, priority int, instanceParams string, delayMS int64, source string) (int64, error) {
 	job, err := s.Get(appID, id)
 	if err != nil {
 		return 0, err
 	}
-	return s.sch.SubmitManualDelayed(job, priority, instanceParams, time.Duration(delayMS)*time.Millisecond)
+	return s.sch.SubmitManualDelayed(job, priority, instanceParams, time.Duration(delayMS)*time.Millisecond, source)
 }

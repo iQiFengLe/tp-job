@@ -311,8 +311,8 @@ func (h *pqHeap) Pop() any     { old := *h; x := old[len(old)-1]; *h = old[:len(
 // SubmitManual 立即手动触发(落库 queued + 入优先队列)。返回 error(落库失败时非 nil)。
 // 不关心 instanceId 的内部调用方用此;需立即拿到 instanceId 的外部触发(OpenAPI runJob)用 SubmitManualDelayed。
 // 重启后残留的 queued 实例由 RecoverQueued 恢复。
-func (s *Scheduler) SubmitManual(job *domain.Job, priority int, instanceParams string) error {
-	_, err := s.SubmitManualDelayed(job, priority, instanceParams, 0)
+func (s *Scheduler) SubmitManual(job *domain.Job, priority int, instanceParams, source string) error {
+	_, err := s.SubmitManualDelayed(job, priority, instanceParams, 0, source)
 	return err
 }
 
@@ -321,7 +321,7 @@ func (s *Scheduler) SubmitManual(job *domain.Job, priority int, instanceParams s
 //
 // 延迟入队用进程内 timer:进程运行期完全正确;重启时未触发的延迟丢失,但实例已落库 queued,
 // 由 RecoverQueued 兜底(重启后立即入队派发——延迟语义丢失但实例不丢,at-least-once)。
-func (s *Scheduler) SubmitManualDelayed(job *domain.Job, priority int, instanceParams string, delay time.Duration) (int64, error) {
+func (s *Scheduler) SubmitManualDelayed(job *domain.Job, priority int, instanceParams string, delay time.Duration, source string) (int64, error) {
 	now := time.Now()
 	ins := &domain.Instance{
 		JobID:             job.ID,
@@ -336,7 +336,11 @@ func (s *Scheduler) SubmitManualDelayed(job *domain.Job, priority int, instanceP
 	if err := s.store.Instance.CreateWithCallback(ins, s.cbBuild(job, domain.StatusQueued)); err != nil {
 		return 0, fmt.Errorf("创建 queued 实例失败: %w", err)
 	}
-	s.appendLog(job, ins, "CREATE", "info", "手动触发排队")
+	// source 区分触发来源(api/openapi-runJob/openapi-runJob2);instanceParams 只记长度不记内容
+	// (可能含业务敏感数据/token),priority/delayMS 非敏感直接记值,便于触发后从日志回溯。
+	s.appendLog(job, ins, "CREATE", "info",
+		fmt.Sprintf("手动触发排队 [来源=%s 优先级=%d 延迟=%dms 参数长度=%d]",
+			source, priority, delay.Milliseconds(), len(instanceParams)))
 	s.enqueueManual(ins, job, priority, delay)
 	return ins.ID, nil
 }

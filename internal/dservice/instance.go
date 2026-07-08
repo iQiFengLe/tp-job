@@ -32,13 +32,33 @@ func NewInstanceService(st *repository.Store, sch *dispatch.Scheduler, il *insta
 //   - 白名单校验(防脏数据)
 //   - 终态守护(store 层):已终态不覆盖
 //   - 进入终态时 ReleaseInFlight 释放该实例占用的任务级槽(幂等)
+//   - 真状态变化(rows>0)时写 STATUS 事件到实例日志(状态变迁 old→new),补全单实例时间线
 func (s *InstanceService) ReportStatus(id int64, status, result string) error {
 	if !domain.StatusValid(status) {
 		return fmt.Errorf("%w: 非法 status %q", ErrInstanceValidate, status)
 	}
-	cb := s.statusCallback(id, status, result)
-	if _, err := s.st.Instance.UpdateResultWithCallback(id, status, result, cb); err != nil {
+	// 入口 Get 一次:供 oldStatus(变迁日志)与 statusCallbackFrom 复用,避免 cbBuilder 启用时二次查询。
+	// NotFound 静默——保持原"实例不存在即静默"语义(UpdateResultWithCallback 对不存在 id 本就 rows==0+nil err)。
+	ins, err := s.st.Instance.Get(id)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
 		return err
+	}
+	oldStatus := ins.Status
+	cb := s.statusCallbackFrom(ins, status)
+	rows, err := s.st.Instance.UpdateResultWithCallback(id, status, result, cb)
+	if err != nil {
+		return err
+	}
+	if rows > 0 {
+		// 终态守护 rows==0(迟到回报/终态重放)不写,避免噪音。
+		level := "info"
+		if status == domain.StatusFailed || status == domain.StatusTimeout {
+			level = "warn"
+		}
+		s.logStatus(ins, level, fmt.Sprintf("状态变迁 %s→%s result=%s", oldStatus, status, truncate(result, 80)))
 	}
 	if domain.StatusTerminal(status) {
 		s.sch.ReleaseInFlight(id)
@@ -73,12 +93,35 @@ func (s *InstanceService) statusCallback(id int64, status, result string) func(*
 	}
 }
 
+// statusCallbackFrom 复用入参 ins(ReportStatus 已 Get)构造状态变更回调,不再二次查询。
+// 语义同 statusCallback;Stop/Cancel 仍用 statusCallback(id,...)(二者无入参 ins,改动面最小)。
+func (s *InstanceService) statusCallbackFrom(ins *domain.Instance, status string) func(*domain.Instance) *domain.Callback {
+	if s.cbBuilder == nil || !s.cbBuilder.Enabled() {
+		return nil
+	}
+	if domain.StatusTerminal(ins.Status) {
+		return nil // 终态短路:守护会让 rows==0,无需构造
+	}
+	job, _ := s.st.Job.Get(ins.AppID, ins.JobID) // 事务外预查(同 statusCallback 死锁约束)
+	return func(latest *domain.Instance) *domain.Callback {
+		return s.cbBuilder.Build(latest, job, status)
+	}
+}
+
 // SetStatus 管理员强制写入状态(纠错:可复活或改终态),不守护、不释放槽。
+// 无条件写 STATUS 审计日志——这是唯一能逆状态机的入口(可把 success 改回 queued 复活),
+// SetStatus 不返 rows、SetStatusWithCallback(nil) 也返 rows=0,无法按 rows 判断;"调过"即值得记。
 func (s *InstanceService) SetStatus(id int64, status, result string) error {
 	if !domain.StatusValid(status) {
 		return fmt.Errorf("%w: 非法 status %q", ErrInstanceValidate, status)
 	}
-	return s.st.Instance.SetStatus(id, status, result)
+	if err := s.st.Instance.SetStatus(id, status, result); err != nil {
+		return err
+	}
+	if ins, err := s.st.Instance.Get(id); err == nil {
+		s.logStatus(ins, "warn", fmt.Sprintf("管理员强制置态→%s result=%s", status, truncate(result, 80)))
+	}
+	return nil
 }
 
 // Stop 标记实例 stopped 并释放其并发槽(供 OpenAPI stopInstance)。
@@ -91,8 +134,14 @@ func (s *InstanceService) SetStatus(id int64, status, result string) error {
 // 槽将永久泄漏、永久拉低 job 的 MaxConcurrency——临时超限(可自愈)远优于永久泄漏。
 func (s *InstanceService) Stop(id int64) error {
 	cb := s.statusCallback(id, domain.StatusStopped, "OpenAPI stop")
-	if _, err := s.st.Instance.SetStatusWithCallback(id, domain.StatusStopped, "OpenAPI stop", cb); err != nil {
+	rows, err := s.st.Instance.SetStatusWithCallback(id, domain.StatusStopped, "OpenAPI stop", cb)
+	if err != nil {
 		return err
+	}
+	if rows > 0 {
+		if ins, e := s.st.Instance.Get(id); e == nil {
+			s.logStatus(ins, "warn", "管理员停止→stopped")
+		}
 	}
 	s.sch.ReleaseInFlight(id)
 	return nil
@@ -101,8 +150,14 @@ func (s *InstanceService) Stop(id int64) error {
 // Cancel 标记实例 canceled 并释放其并发槽(供 OpenAPI cancelInstance)。语义/限制同 Stop,见其注释。
 func (s *InstanceService) Cancel(id int64) error {
 	cb := s.statusCallback(id, domain.StatusCanceled, "OpenAPI cancel")
-	if _, err := s.st.Instance.SetStatusWithCallback(id, domain.StatusCanceled, "OpenAPI cancel", cb); err != nil {
+	rows, err := s.st.Instance.SetStatusWithCallback(id, domain.StatusCanceled, "OpenAPI cancel", cb)
+	if err != nil {
 		return err
+	}
+	if rows > 0 {
+		if ins, e := s.st.Instance.Get(id); e == nil {
+			s.logStatus(ins, "warn", "管理员取消→canceled")
+		}
 	}
 	s.sch.ReleaseInFlight(id)
 	return nil
@@ -186,4 +241,25 @@ func (s *InstanceService) LogsInApp(appID, id int64, q LogQuery) ([]string, int,
 		return s.il.ReadGroup(ins.AppID, rootID, iq)
 	}
 	return s.il.Read(ins.AppID, ins.ID, rootID, iq)
+}
+
+// logStatus 写一条 STATUS 事件到实例日志文件。ins 提供 AppID/RootInstanceID 定位文件;
+// LogEntry 字段与 dispatch.Scheduler.appendLogRaw 一致(显式 Time 对齐)。
+func (s *InstanceService) logStatus(ins *domain.Instance, level, msg string) {
+	if s.il == nil || ins == nil {
+		return
+	}
+	s.il.Append(ins.AppID, ins.ID, domain.RootOf(ins), instancelog.LogEntry{
+		Time: time.Now(), Kind: "STATUS", Level: level, Message: msg,
+	})
+}
+
+// truncate 按 rune 截断到 maxRunes,超长追加省略号(按 rune 避免切断 UTF-8 多字节字符)。
+// 用于把可能很长的 result 截到日志友好长度。
+func truncate(s string, maxRunes int) string {
+	r := []rune(s)
+	if len(r) <= maxRunes {
+		return s
+	}
+	return string(r[:maxRunes]) + "…"
 }
