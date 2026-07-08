@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	_ "net/http/pprof" // 注册 /debug/pprof 到 DefaultServeMux(独立 pprof server 用,主服务卡死时仍可抓栈)
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -227,6 +228,15 @@ func main() {
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Error("HTTP 服务异常退出", "err", err)
 			cancel()
+		}
+	}()
+
+	// pprof 诊断端点(独立 listener + DefaultServeMux,不受主 gin server 阻塞影响):
+	// 主服务卡死时仍可 curl 127.0.0.1:6060/debug/pprof/goroutine?debug=2 抓全栈定位。仅监听本地。
+	go func() {
+		pprofSrv := &http.Server{Addr: "127.0.0.1:6060", Handler: http.DefaultServeMux}
+		if err := pprofSrv.ListenAndServe(); err != nil {
+			log.Error("pprof 服务退出", "err", err)
 		}
 	}()
 
