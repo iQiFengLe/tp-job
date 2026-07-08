@@ -641,32 +641,91 @@ func TestDispatchAbortsOnConcurrentTerminal(t *testing.T) {
 
 func TestRetryBackoff(t *testing.T) {
 	cases := []struct {
-		intervalSec int
-		retryIndex  int
-		want        time.Duration
+		intervalSec   int
+		retryIndex    int
+		maxBackoffSec int
+		want          time.Duration
 	}{
-		// 默认 base=1s(IntervalSec=0 兜底):1s/2s/4s/8s/16s...
-		{0, 0, 1 * time.Second},
-		{0, 1, 2 * time.Second},
-		{0, 2, 4 * time.Second},
-		{0, 3, 8 * time.Second},
-		{0, 4, 16 * time.Second},
-		// 自定义 base:10s/20s/40s/80s...
-		{10, 0, 10 * time.Second},
-		{10, 1, 20 * time.Second},
-		{10, 2, 40 * time.Second},
-		{10, 3, 80 * time.Second},
-		// 大 retryIndex clamp 到 30min(默认上限)
-		{1, 100, 30 * time.Minute},
-		{10, 100, 30 * time.Minute},
-		// base 超过默认上限:以 base 为上限,不压缩用户意图(不再翻倍)
-		{3600, 0, time.Hour},
-		{3600, 5, time.Hour},
+		// 默认 base=1s,max=0→默认 30min:1s/2s/4s/8s/16s
+		{0, 0, 0, 1 * time.Second},
+		{0, 1, 0, 2 * time.Second},
+		{0, 2, 0, 4 * time.Second},
+		{0, 3, 0, 8 * time.Second},
+		{0, 4, 0, 16 * time.Second},
+		// 自定义 base:10s/20s/40s/80s
+		{10, 0, 0, 10 * time.Second},
+		{10, 1, 0, 20 * time.Second},
+		{10, 2, 0, 40 * time.Second},
+		{10, 3, 0, 80 * time.Second},
+		// 大 retryIndex clamp 到默认 30min
+		{1, 100, 0, 30 * time.Minute},
+		{10, 100, 0, 30 * time.Minute},
+		// 自定义 max 上限
+		{1, 100, 60, 60 * time.Second},  // clamp 60s
+		{10, 5, 300, 300 * time.Second}, // 10→20→40→80→160→320>300,clamp 300s
+		{1, 3, 60, 8 * time.Second},     // 1→2→4→8,未到 60s
+		// base 超过默认上限:以 base 为上限(不压缩)
+		{3600, 0, 0, time.Hour},
+		{3600, 5, 0, time.Hour},
+		// base 超过自定义 max:以 base 为上限
+		{3600, 5, 60, time.Hour},
 	}
 	for _, c := range cases {
-		got := retryBackoff(c.intervalSec, c.retryIndex)
+		got := retryBackoff(c.intervalSec, c.retryIndex, time.Duration(c.maxBackoffSec)*time.Second)
 		if got != c.want {
-			t.Errorf("retryBackoff(%d,%d)=%v, want %v", c.intervalSec, c.retryIndex, got, c.want)
+			t.Errorf("retryBackoff(%d,%d,%d)=%v, want %v", c.intervalSec, c.retryIndex, c.maxBackoffSec, got, c.want)
 		}
+	}
+}
+
+func TestParseJitterRange(t *testing.T) {
+	cases := []struct {
+		s          string
+		min, max   float64
+		ok         bool
+	}{
+		{"", 0, 0, false},
+		{"0.5:1", 0.5, 1, true},
+		{"0.5:1.5", 0.5, 1.5, true},
+		{"1:1", 1, 1, true},
+		{" 0.5 : 1 ", 0.5, 1, true}, // trim
+		{"0.5", 0, 0, false},        // 无冒号
+		{":1", 0, 0, false},         // min 空
+		{"0:1", 0, 0, false},        // min<=0
+		{"1:0.5", 0, 0, false},      // max<min
+		{"abc:def", 0, 0, false},
+	}
+	for _, c := range cases {
+		min, max, ok := parseJitterRange(c.s)
+		if ok != c.ok || (ok && (min != c.min || max != c.max)) {
+			t.Errorf("parseJitterRange(%q)=(%v,%v,%v), want (%v,%v,%v)", c.s, min, max, ok, c.min, c.max, c.ok)
+		}
+	}
+}
+
+func TestApplyJitter(t *testing.T) {
+	base := 10 * time.Second
+	// 空/非法 jitter = 不抖动
+	if got := applyJitter(base, ""); got != base {
+		t.Errorf("空 jitter 应不抖动, got %v", got)
+	}
+	if got := applyJitter(base, "xyz"); got != base {
+		t.Errorf("非法 jitter 应不抖动, got %v", got)
+	}
+	// "0.5:1" → [5s, 10s)
+	for i := 0; i < 100; i++ {
+		got := applyJitter(base, "0.5:1")
+		if got < 5*time.Second || got >= 10*time.Second {
+			t.Errorf("抖动后 %v 不在 [5s,10s)", got)
+		}
+	}
+	// "1:1" → 因子恒 1,等于 base
+	if got := applyJitter(base, "1:1"); got != base {
+		t.Errorf("1:1 应等于 base, got %v", got)
+	}
+	// 抖动后不低于 1s
+	got := applyJitter(2*time.Second, "0.1:0.2")
+	if got < 1*time.Second {
+		t.Errorf("抖动后不应低于 1s, got %v", got)
 	}
 }

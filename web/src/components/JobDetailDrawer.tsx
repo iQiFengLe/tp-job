@@ -31,6 +31,8 @@ export default function JobDetailDrawer(props: { job?: JobView; onClose: () => v
           <Descriptions.Item label="排队等待秒">{job.max_wait_seconds || '-'}</Descriptions.Item>
           <Descriptions.Item label="重试次数">{job.retry_count || 0}</Descriptions.Item>
           <Descriptions.Item label="重试间隔秒">{job.retry_interval_sec || 0}</Descriptions.Item>
+          <Descriptions.Item label="抖动因子">{job.retry_jitter || '-'}</Descriptions.Item>
+          <Descriptions.Item label="退避上限秒">{job.retry_max_backoff_sec || '默认 1800'}</Descriptions.Item>
           <Descriptions.Item label="默认优先级">{job.default_priority || 0}</Descriptions.Item>
           <Descriptions.Item label="状态">
             <Tag color={job.enabled ? 'success' : 'default'} style={{ fontWeight: 500 }}>

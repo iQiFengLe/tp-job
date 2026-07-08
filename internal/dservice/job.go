@@ -101,23 +101,29 @@ func (s *JobService) Update(appID, id int64, fields map[string]any) error {
 	if len(fields) == 0 {
 		return nil
 	}
-	if hasScheduleChange(fields) {
+	// 调度字段变化需重算 next_run;重试选项变化需合并进 Options JSON——两者都要读现有 job,合并读一次。
+	if hasScheduleChange(fields) || hasRetryOptsChange(fields) {
 		cur, err := s.Get(appID, id)
 		if err != nil {
 			return err
 		}
-		applyJobFields(cur, fields) // 合并待更新字段到 job 副本,据此重算与校验
-		if err := validateJob(cur); err != nil {
-			return fmt.Errorf("%w: %v", ErrJobValidate, err)
+		if hasScheduleChange(fields) {
+			applyJobFields(cur, fields) // 合并待更新字段到 job 副本,据此重算与校验
+			if err := validateJob(cur); err != nil {
+				return fmt.Errorf("%w: %v", ErrJobValidate, err)
+			}
+			next, err := computeNextRun(cur)
+			if err != nil {
+				return fmt.Errorf("%w: %v", ErrJobValidate, err)
+			}
+			if next != nil {
+				fields["next_run_time"] = *next
+			} else {
+				fields["next_run_time"] = nil
+			}
 		}
-		next, err := computeNextRun(cur)
-		if err != nil {
-			return fmt.Errorf("%w: %v", ErrJobValidate, err)
-		}
-		if next != nil {
-			fields["next_run_time"] = *next
-		} else {
-			fields["next_run_time"] = nil
+		if hasRetryOptsChange(fields) {
+			mergeRetryOpts(cur, fields) // retry_jitter/retry_max_backoff_sec → options,删临时 key
 		}
 	}
 	return s.st.Job.Update(id, fields)
@@ -132,6 +138,31 @@ func hasScheduleChange(fields map[string]any) bool {
 		}
 	}
 	return false
+}
+
+// hasRetryOptsChange 判断是否含重试选项字段(retry_jitter/retry_max_backoff_sec)。
+// 这两项不是 DB 列,需在 mergeRetryOpts 里合并进 Options JSON 后删除,不能直传 store.Update。
+func hasRetryOptsChange(fields map[string]any) bool {
+	_, ok1 := fields["retry_jitter"]
+	_, ok2 := fields["retry_max_backoff_sec"]
+	return ok1 || ok2
+}
+
+// mergeRetryOpts 把 fields 里的 retry_jitter/retry_max_backoff_sec 合并进 cur.Options 后重 marshal
+// 写入 fields["options"],并删除两个临时 key。部分更新语义:只改其一时另一项保留(读 cur 原值)。
+func mergeRetryOpts(cur *domain.Job, fields map[string]any) {
+	opts := cur.ParseOptions()
+	if v, ok := fields["retry_jitter"]; ok {
+		if s, ok := v.(string); ok {
+			opts.RetryJitter = s
+		}
+		delete(fields, "retry_jitter")
+	}
+	if v, ok := fields["retry_max_backoff_sec"]; ok {
+		opts.RetryMaxBackoffSec = toInt(v)
+		delete(fields, "retry_max_backoff_sec")
+	}
+	fields["options"] = opts.JSON()
 }
 
 // applyJobFields 把 fields(db 列名→值)覆盖到 job 副本,供 Update 重算/校验读取合并后的状态。

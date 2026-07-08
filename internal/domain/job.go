@@ -1,6 +1,10 @@
 package domain
 
-import "time"
+import (
+	"encoding/json"
+	"strings"
+	"time"
+)
 
 // Job 任务定义。当前执行模式唯一为 http 派发(ExecuteType=http):服务端选一个在线 worker,
 // POST 固定 body(见 DispatchBody)交付执行。不再支持用户自定义 webhook URL/headers/body。
@@ -30,6 +34,9 @@ type Job struct {
 	// —— 回调(可选)——
 	CallbackURL string `gorm:"type:varchar(512)" json:"callback_url,omitempty"` // 实例状态变化时 POST 通知此 URL,至少一次
 
+	// —— 扩展选项(JSON,见 JobOptions)——
+	Options string `gorm:"type:text" json:"options,omitempty"` // 可扩展配置(重试抖动/退避上限等),不单独建列
+
 	// —— 并发 / 排队 / 重试 ——
 	MaxConcurrency   int  `gorm:"default:1" json:"max_concurrency,omitempty"`
 	MaxWaitSeconds   int  `gorm:"default:0" json:"max_wait_seconds,omitempty"` // 排队等待超时(秒;⚠ 当前未实现,预留——配置后无效果)
@@ -49,3 +56,33 @@ type Job struct {
 }
 
 func (Job) TableName() string { return "job" }
+
+// JobOptions Job.Options 的 JSON 结构(可扩展,当前仅重试退避相关)。
+type JobOptions struct {
+	RetryJitter        string `json:"retry_jitter,omitempty"`         // 抖动范围 "min:max"(如 "0.5:1");空=不抖动。语义:最终间隔=退避值×random[min,max]
+	RetryMaxBackoffSec int    `json:"retry_max_backoff_sec,omitempty"` // 退避上限(秒);0=默认 30min
+}
+
+// ParseOptions 解析 Options JSON;空/非法兜底零值(不阻断重试)。
+func (j *Job) ParseOptions() JobOptions {
+	if strings.TrimSpace(j.Options) == "" {
+		return JobOptions{}
+	}
+	var o JobOptions
+	if err := json.Unmarshal([]byte(j.Options), &o); err != nil {
+		return JobOptions{}
+	}
+	return o
+}
+
+// JSON 序列化为 Options 列存储串;空选项返回 ""(避免存 "{}")。
+func (o JobOptions) JSON() string {
+	b, err := json.Marshal(o)
+	if err != nil {
+		return ""
+	}
+	if s := string(b); s != "{}" {
+		return s
+	}
+	return ""
+}

@@ -5,8 +5,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -831,9 +833,13 @@ func (s *Scheduler) scheduleRetry(ins *domain.Instance, job *domain.Job) {
 	if job.RetryCount <= 0 || ins.RetryIndex >= job.RetryCount {
 		return
 	}
-	// 指数退避:以 RetryIntervalSec 为基数每次翻倍(1s→2s→4s...),封顶 30min。缓解网络抖动/worker
+	// 指数退避(以 RetryIntervalSec 为基数翻倍,上限取 Options.RetryMaxBackoffSec,0=默认 30min)
+	// + 抖动(Options.RetryJitter "min:max",最终间隔 × random[min,max] 防惊群)。缓解网络抖动/worker
 	// 短暂不可达下短时间内把 RetryCount 用尽导致最终失败——retryIndex 越大间隔越长,给恢复留时间。
-	interval := retryBackoff(job.RetryIntervalSec, ins.RetryIndex)
+	opts := job.ParseOptions()
+	maxBackoff := time.Duration(opts.RetryMaxBackoffSec) * time.Second
+	interval := retryBackoff(job.RetryIntervalSec, ins.RetryIndex, maxBackoff)
+	interval = applyJitter(interval, opts.RetryJitter)
 	if err := s.store.Instance.SetNextRetryTime(ins.ID, time.Now().Add(interval)); err != nil {
 		s.log.Error("设定重试时间失败", "instance_id", ins.ID, "err", err)
 	}
@@ -842,15 +848,16 @@ func (s *Scheduler) scheduleRetry(ins *domain.Instance, job *domain.Job) {
 // retryBackoff 计算实例重试退避间隔:base * 2^retryIndex,clamp 到 [1s, maxBackoff]。
 // base 取 retryIntervalSec(默认 0→1s);用循环翻倍而非位移,避免大 retryIndex 下 int64 溢出。
 // retryIndex 为当前实例已重试次数(即将创建第 retryIndex+1 次重试)。
-// 例:base=10s → 第1次重试等 10s,第2次 20s,第3次 40s...;base=1s → 1s/2s/4s/8s...
-// maxBackoff 默认 30min;用户配的 base 超过此值时以 base 为上限(不压缩用户意图)。
-func retryBackoff(retryIntervalSec, retryIndex int) time.Duration {
-	const defaultMaxBackoff = 30 * time.Minute
+// maxBackoff<=0 时默认 30min;base 超过 maxBackoff 时以 base 为上限(不压缩用户意图)。
+// 例:base=10s,max=30min → 第1次重试等 10s,第2次 20s,第3次 40s...
+func retryBackoff(retryIntervalSec, retryIndex int, maxBackoff time.Duration) time.Duration {
+	if maxBackoff <= 0 {
+		maxBackoff = 30 * time.Minute
+	}
 	base := time.Duration(retryIntervalSec) * time.Second
 	if base < time.Second {
 		base = time.Second
 	}
-	maxBackoff := defaultMaxBackoff
 	if base > maxBackoff {
 		maxBackoff = base
 	}
@@ -862,6 +869,40 @@ func retryBackoff(retryIntervalSec, retryIndex int) time.Duration {
 		d = maxBackoff
 	}
 	return d
+}
+
+// applyJitter 按 jitter 范围对 interval 加随机抖动,防大量任务同退避值同时重试(惊群)。
+// jitter 格式 "min:max"(如 "0.5:1"),语义:最终间隔 = interval × random[min,max)。
+// 空/非法格式不抖动(返回原 interval);抖动后不低于 1s。
+func applyJitter(interval time.Duration, jitter string) time.Duration {
+	minF, maxF, ok := parseJitterRange(jitter)
+	if !ok {
+		return interval
+	}
+	factor := minF + (maxF-minF)*rand.Float64() // [min, max)
+	d := time.Duration(float64(interval) * factor)
+	if d < time.Second {
+		d = time.Second
+	}
+	return d
+}
+
+// parseJitterRange 解析 "min:max"(如 "0.5:1")→ (min, max, true)。校验 0<min<=max;非法返回 false。
+func parseJitterRange(s string) (min, max float64, ok bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, 0, false
+	}
+	parts := strings.SplitN(s, ":", 2)
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	min, err1 := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
+	max, err2 := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+	if err1 != nil || err2 != nil || min <= 0 || max < min {
+		return 0, 0, false
+	}
+	return min, max, true
 }
 
 // dispatchToWorker 执行「选后即绑」派发:PickWorker → MarkDispatched → Send。

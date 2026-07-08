@@ -52,6 +52,8 @@ type CreateJobReq struct {
 	MaxWaitSeconds   int    `json:"max_wait_seconds"`
 	RetryCount       int    `json:"retry_count"`
 	RetryIntervalSec int    `json:"retry_interval_sec"`
+	RetryJitter        string `json:"retry_jitter,omitempty"`         // 抖动范围 "min:max"(如 "0.5:1");空=不抖动
+	RetryMaxBackoffSec int    `json:"retry_max_backoff_sec,omitempty"` // 退避上限(秒);0=默认 30min
 	DefaultPriority  int    `json:"default_priority"`
 	CallbackURL      string `json:"callback_url,omitempty"`
 	Enabled          *bool  `json:"enabled"`
@@ -72,6 +74,8 @@ type UpdateJobReq struct {
 	MaxWaitSeconds   *int    `json:"max_wait_seconds"`
 	RetryCount       *int    `json:"retry_count"`
 	RetryIntervalSec *int    `json:"retry_interval_sec"`
+	RetryJitter        *string `json:"retry_jitter"`
+	RetryMaxBackoffSec *int    `json:"retry_max_backoff_sec"`
 	DefaultPriority  *int    `json:"default_priority"`
 	CallbackURL      *string `json:"callback_url"`
 	Enabled          *bool   `json:"enabled"`
@@ -98,6 +102,8 @@ type JobView struct {
 	MaxWaitSeconds   int  `json:"max_wait_seconds,omitempty"`
 	RetryCount       int  `json:"retry_count,omitempty"`
 	RetryIntervalSec int  `json:"retry_interval_sec,omitempty"`
+	RetryJitter        string `json:"retry_jitter,omitempty"`
+	RetryMaxBackoffSec int    `json:"retry_max_backoff_sec,omitempty"`
 	DefaultPriority  int    `json:"default_priority,omitempty"`
 	CallbackURL      string `json:"callback_url,omitempty"`
 	Enabled          bool   `json:"enabled"`
@@ -201,6 +207,7 @@ func AppToView(a *domain.App) AppView {
 }
 
 func JobToView(j *domain.Job) JobView {
+	opts := j.ParseOptions()
 	return JobView{
 		ID: j.ID, AppID: j.AppID, Name: j.Name, Description: j.Description,
 		ExecuteType: j.ExecuteType, JobParams: j.JobParams, Tag: j.Tag, TimeoutSec: j.TimeoutSec,
@@ -208,6 +215,7 @@ func JobToView(j *domain.Job) JobView {
 		StartTime: timeToMs(j.StartTime), EndTime: timeToMs(j.EndTime),
 		MaxConcurrency: j.MaxConcurrency, MaxWaitSeconds: j.MaxWaitSeconds,
 		RetryCount: j.RetryCount, RetryIntervalSec: j.RetryIntervalSec,
+		RetryJitter: opts.RetryJitter, RetryMaxBackoffSec: opts.RetryMaxBackoffSec,
 		DefaultPriority: j.DefaultPriority, CallbackURL: j.CallbackURL, Enabled: j.Enabled,
 		FromID: j.FromID, FromType: j.FromType,
 		CreatedAt: j.CreatedAt, UpdatedAt: j.UpdatedAt,
@@ -255,6 +263,7 @@ func CreateJobReqToJob(appID int64, req CreateJobReq) (*domain.Job, error) {
 		StartTime: msToTimePtr(req.StartTime), EndTime: msToTimePtr(req.EndTime),
 		MaxConcurrency: maxConc, MaxWaitSeconds: maxWait,
 		RetryCount: req.RetryCount, RetryIntervalSec: req.RetryIntervalSec,
+		Options: domain.JobOptions{RetryJitter: req.RetryJitter, RetryMaxBackoffSec: req.RetryMaxBackoffSec}.JSON(),
 		DefaultPriority: req.DefaultPriority, CallbackURL: req.CallbackURL, Enabled: enabled,
 	}, nil
 }
@@ -304,6 +313,12 @@ func UpdateJobReqToFields(req UpdateJobReq) map[string]any {
 	}
 	if req.RetryIntervalSec != nil {
 		f["retry_interval_sec"] = *req.RetryIntervalSec
+	}
+	if req.RetryJitter != nil {
+		f["retry_jitter"] = *req.RetryJitter
+	}
+	if req.RetryMaxBackoffSec != nil {
+		f["retry_max_backoff_sec"] = *req.RetryMaxBackoffSec
 	}
 	if req.DefaultPriority != nil {
 		f["default_priority"] = *req.DefaultPriority

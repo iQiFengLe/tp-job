@@ -97,6 +97,8 @@ export interface JobView {
   max_wait_seconds?: number;
   retry_count?: number;
   retry_interval_sec?: number;
+  retry_jitter?: string;
+  retry_max_backoff_sec?: number;
   default_priority?: number;
   callback_url?: string;
   enabled: boolean;
@@ -144,6 +146,8 @@ export interface JobCreateValues {
   max_wait_seconds?: number;
   retry_count?: number;
   retry_interval_sec?: number;
+  retry_jitter?: string;
+  retry_max_backoff_sec?: number;
   default_priority?: number;
   start_time?: number;
   end_time?: number;
