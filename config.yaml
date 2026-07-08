@@ -56,6 +56,13 @@ auth:
   # login:
   #   max_attempts_per_min: 10
 
+# pprof 诊断端点(net/http/pprof,独立 listener,主服务卡死时仍可抓 goroutine 栈定位)。默认关闭。
+# 排查死锁/阻塞时改 enabled: true。⚠ 无鉴权:listen 用 0.0.0.0 会暴露给可达网络(可读栈/堆),
+# 仅本机(127.0.0.1)或可信网络启用。
+pprof:
+  enabled: false              # 默认关;诊断时改 true
+  listen: "127.0.0.1:6060"    # 抓栈地址;本机留 127.0.0.1,远程抓栈改 0.0.0.0:6060(⚠ 仅可信网络)
+
 # 环境变量(优先级高于本文件,便于容器/CI 注入,避免明文落盘):
 #   TASK_SCHEDULE_DB_DRIVER               → database.driver (sqlite|mysql)
 #   TASK_SCHEDULE_MYSQL_DSN               → database.mysql.dsn

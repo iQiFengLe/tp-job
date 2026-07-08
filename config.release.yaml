@@ -51,5 +51,11 @@ auth:
   login:
     max_attempts_per_min: 10   # release 强制要求(防爆破 + bcrypt DoS)
 
+# pprof 诊断端点(默认关闭)。排查卡死/死锁时改 enabled: true。
+# ⚠ 无鉴权:仅本机(127.0.0.1)或可信网络启用;0.0.0.0 会暴露栈/堆 profile 给可达网络。
+pprof:
+  enabled: false
+  listen: "127.0.0.1:6060"
+
 # 环境变量(优先级高于本文件):TASK_SCHEDULE_DB_DRIVER / TASK_SCHEDULE_MYSQL_DSN / TASK_SCHEDULE_POWERJOB_SERVER_ADDRESS
 # server.mode 不支持 env 覆盖。

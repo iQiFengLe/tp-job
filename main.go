@@ -232,13 +232,17 @@ func main() {
 	}()
 
 	// pprof 诊断端点(独立 listener + DefaultServeMux,不受主 gin server 阻塞影响):
-	// 主服务卡死时仍可 curl 127.0.0.1:6060/debug/pprof/goroutine?debug=2 抓全栈定位。仅监听本地。
-	go func() {
-		pprofSrv := &http.Server{Addr: "127.0.0.1:6060", Handler: http.DefaultServeMux}
-		if err := pprofSrv.ListenAndServe(); err != nil {
-			log.Error("pprof 服务退出", "err", err)
-		}
-	}()
+	// 主服务卡死时仍可 curl <listen>/debug/pprof/goroutine?debug=2 抓全栈定位。
+	// 由 cfg.Pprof 控制:默认关闭;启用时按 listen 绑定(127.0.0.1 仅本机 / 0.0.0.0 可远程)。
+	// ⚠ pprof 无鉴权,0.0.0.0 仅在可信网络启用(可读 goroutine 栈/堆 profile)。
+	if cfg.Pprof.Enabled {
+		go func() {
+			log.Info("pprof 诊断端点启动", "listen", cfg.Pprof.Listen)
+			if err := http.ListenAndServe(cfg.Pprof.Listen, nil); err != nil {
+				log.Error("pprof 服务退出", "err", err)
+			}
+		}()
+	}
 
 	// 优雅关闭
 	quit := make(chan os.Signal, 1)

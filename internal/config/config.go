@@ -23,6 +23,7 @@ type Config struct {
 	Scheduler Scheduler `yaml:"scheduler"`
 	Worker    Worker    `yaml:"worker"`
 	PowerJob  PowerJob  `yaml:"powerjob"`
+	Pprof     Pprof     `yaml:"pprof"`
 }
 
 type Database struct {
@@ -76,6 +77,14 @@ type Worker struct {
 // 统一由 dispatch 调度器处理。
 type PowerJob struct {
 	ServerAddress string `yaml:"server_address"` // /server/acquire 返回值;PowerJob worker 可达的 host:port
+}
+
+// Pprof pprof 诊断端点配置(net/http/pprof,注册到 DefaultServeMux,独立 listener,主 gin 服务卡死时
+// 仍可抓栈定位)。默认关闭——生产不开,排查死锁/阻塞时在 config 开启。⚠ pprof 无鉴权,listen 用
+// 0.0.0.0 时会暴露给可达网络(可读 goroutine 栈/堆 profile),仅本机(127.0.0.1)或可信网络启用。
+type Pprof struct {
+	Enabled bool   `yaml:"enabled"` // 是否启用;默认 false
+	Listen  string `yaml:"listen"`  // 监听地址 host:port;默认 127.0.0.1:6060
 }
 
 // Auth 管理端鉴权配置:登录会话参数 + 登录端点限流。管理员账户走 admin_user 表
@@ -202,6 +211,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Auth.Session.TTLSeconds == 0 {
 		c.Auth.Session.TTLSeconds = 86400
+	}
+	if c.Pprof.Listen == "" {
+		c.Pprof.Listen = "127.0.0.1:6060"
 	}
 }
 
