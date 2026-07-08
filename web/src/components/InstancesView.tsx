@@ -1,5 +1,5 @@
-import { FileTextOutlined, ReloadOutlined } from '@ant-design/icons';
-import { Button, InputNumber, Select, Table, Tag, Tooltip, Typography } from 'antd';
+import { FileTextOutlined, InfoCircleOutlined, ReloadOutlined } from '@ant-design/icons';
+import { Button, InputNumber, Select, Space, Table, Tag, Tooltip, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useEffect, useState } from 'react';
 import { api } from '../api';
@@ -7,6 +7,7 @@ import { PAGE_SIZE, formatTime, statusColor, statusLabel, statusOptions, trigger
 import { scheduleKindOptions } from '../schedule';
 import type { InstanceView } from '../types';
 import AppGate from './AppGate';
+import InstanceDetailDrawer from './InstanceDetailDrawer';
 import LogsDrawer from './LogsDrawer';
 
 const { Text, Title } = Typography;
@@ -21,6 +22,7 @@ export default function InstancesView(props: { appId?: number; onError: (error: 
   const [logLines, setLogLines] = useState<string[]>([]);
   const [logTitle, setLogTitle] = useState('');
   const [logOpen, setLogOpen] = useState(false);
+  const [detailInstance, setDetailInstance] = useState<InstanceView>();
 
   const load = async (p = page, s = size) => {
     if (!props.appId) return;
@@ -75,13 +77,16 @@ export default function InstancesView(props: { appId?: number; onError: (error: 
     { title: '触发时间', dataIndex: 'trigger_time', render: formatTime, width: 180 },
     {
       title: '操作',
-      width: 100,
+      width: 110,
       render: (_, record) => (
-        <Tooltip title="查看日志">
-          <Button size="small" icon={<FileTextOutlined />} onClick={() => openLogs(record)}>
-            日志
-          </Button>
-        </Tooltip>
+        <Space size="small">
+          <Tooltip title="详情">
+            <Button size="small" icon={<InfoCircleOutlined />} onClick={() => setDetailInstance(record)} />
+          </Tooltip>
+          <Tooltip title="查看日志">
+            <Button size="small" icon={<FileTextOutlined />} onClick={() => openLogs(record)} />
+          </Tooltip>
+        </Space>
       ),
     },
   ];
@@ -134,6 +139,7 @@ export default function InstancesView(props: { appId?: number; onError: (error: 
         }}
       />
       <LogsDrawer title={logTitle} open={logOpen} lines={logLines} onClose={() => setLogOpen(false)} />
+      <InstanceDetailDrawer instance={detailInstance} onClose={() => setDetailInstance(undefined)} onShowLogs={openLogs} />
     </section>
   );
 }
