@@ -88,11 +88,11 @@ export default function JobModal(props: {
           <Form.Item name="retry_count" label="重试次数">
             <InputNumber min={0} className="full" />
           </Form.Item>
-          <Form.Item name="retry_interval_sec" label="重试间隔秒" tooltip="退避基数:首次重试等 N 秒,此后每次翻倍;0=默认 1s">
+          <Form.Item name="retry_interval_sec" label="重试间隔秒" tooltip="重试间隔基数(0=默认 1s):固定模式=每次等待值;指数模式=退避基数">
             <InputNumber min={0} className="full" />
           </Form.Item>
-          <Form.Item name="retry_jitter" label="抖动因子" tooltip='范围 "min:max",如 0.5:1 → 实际间隔在退避值的 50%~100% 随机(防惊群);留空不抖动'>
-            <Input placeholder="0.5:1" />
+          <Form.Item name="retry_jitter" label="抖动因子" tooltip="留空=固定重试(不退避);填 1=指数退避(1/2/4/8/16×间隔);填 0.5:1=指数退避+50%~100%抖动">
+            <Input placeholder="1 或 0.5:1" />
           </Form.Item>
           <Form.Item name="retry_max_backoff_sec" label="退避上限秒" tooltip="退避间隔封顶值;0=默认 1800(30min)">
             <InputNumber min={0} className="full" />

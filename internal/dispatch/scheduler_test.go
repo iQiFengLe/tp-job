@@ -689,10 +689,13 @@ func TestParseJitterRange(t *testing.T) {
 		{"0.5:1.5", 0.5, 1.5, true},
 		{"1:1", 1, 1, true},
 		{" 0.5 : 1 ", 0.5, 1, true}, // trim
-		{"0.5", 0, 0, false},        // 无冒号
-		{":1", 0, 0, false},         // min 空
-		{"0:1", 0, 0, false},        // min<=0
-		{"1:0.5", 0, 0, false},      // max<min
+		// 单值:min=max=该值(等同 "v:v")
+		{"1", 1, 1, true},
+		{"0.5", 0.5, 0.5, true},
+		{"0", 0, 0, false},   // <=0 非法
+		{":1", 0, 0, false},  // min 空
+		{"0:1", 0, 0, false}, // min<=0
+		{"1:0.5", 0, 0, false}, // max<min
 		{"abc:def", 0, 0, false},
 	}
 	for _, c := range cases {
@@ -727,5 +730,44 @@ func TestApplyJitter(t *testing.T) {
 	got := applyJitter(2*time.Second, "0.1:0.2")
 	if got < 1*time.Second {
 		t.Errorf("抖动后不应低于 1s, got %v", got)
+	}
+}
+
+func TestComputeRetryInterval(t *testing.T) {
+	// 空 jitter = 固定重试(retryIndex 不影响)
+	if got := computeRetryInterval(10, 0, domain.JobOptions{}); got != 10*time.Second {
+		t.Errorf("空 jitter retryIndex=0 应 10s, got %v", got)
+	}
+	if got := computeRetryInterval(10, 5, domain.JobOptions{}); got != 10*time.Second {
+		t.Errorf("空 jitter 固定重试不受 retryIndex 影响, got %v", got)
+	}
+	// "0" = 固定重试
+	if got := computeRetryInterval(10, 5, domain.JobOptions{RetryJitter: "0"}); got != 10*time.Second {
+		t.Errorf("'0' 应固定重试 10s, got %v", got)
+	}
+	// "1" = 纯指数退避无抖动:1/2/4/8/16×base
+	if got := computeRetryInterval(10, 0, domain.JobOptions{RetryJitter: "1"}); got != 10*time.Second {
+		t.Errorf("'1' retryIndex=0 应 10s, got %v", got)
+	}
+	if got := computeRetryInterval(10, 1, domain.JobOptions{RetryJitter: "1"}); got != 20*time.Second {
+		t.Errorf("'1' retryIndex=1 应 20s, got %v", got)
+	}
+	if got := computeRetryInterval(10, 3, domain.JobOptions{RetryJitter: "1"}); got != 80*time.Second {
+		t.Errorf("'1' retryIndex=3 应 80s, got %v", got)
+	}
+	// "0.5:1" = 指数退避 + 抖动,retryIndex=2 → backoff=40s → [20s,40s)
+	for i := 0; i < 100; i++ {
+		got := computeRetryInterval(10, 2, domain.JobOptions{RetryJitter: "0.5:1"})
+		if got < 20*time.Second || got >= 40*time.Second {
+			t.Errorf("'0.5:1' retryIndex=2 应在 [20s,40s), got %v", got)
+		}
+	}
+	// 退避上限生效
+	if got := computeRetryInterval(10, 100, domain.JobOptions{RetryJitter: "1", RetryMaxBackoffSec: 60}); got != 60*time.Second {
+		t.Errorf("max=60s 应 clamp 60s, got %v", got)
+	}
+	// base 兜底 1s
+	if got := computeRetryInterval(0, 0, domain.JobOptions{}); got != 1*time.Second {
+		t.Errorf("base=0 应兜底 1s, got %v", got)
 	}
 }
