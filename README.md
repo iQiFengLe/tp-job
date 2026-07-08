@@ -20,16 +20,17 @@
 # 1. 构建前端(嵌入进二进制)
 cd web && npm install && npm run build && cd ..
 
-# 2. 运行(debug 模式默认种占位管理员 admin / change-me-admin,开箱即用)
+# 2. 运行(debug 模式默认种管理员 admin / admin123,开箱即用)
 go run .
 
 # 3. 另起一个终端,跑示例 http worker(先在管理台或用 API 建 app "demo")
 go run ./examples/http-worker -server http://127.0.0.1:8080 -app demo -addr :9001
 
-# 4. 打开 http://127.0.0.1:8080 → 用 admin / change-me-admin 登录 → 建 app → 建 api 任务 → 触发
+# 4. 打开 http://127.0.0.1:8080 → 用 admin / admin123 登录 → 建 app → 建 api 任务 → 触发
 ```
 
-release 模式拒绝默认占位密码启动(见下「鉴权」)。
+release 模式强制登录限流(`config.release.yaml` 显式配 `auth.login.max_attempts_per_min`),
+不拦截默认口令——默认 `admin/admin123` 首登后请立即在「账户设置」改密(见下「鉴权」)。
 
 ## 目录结构
 
