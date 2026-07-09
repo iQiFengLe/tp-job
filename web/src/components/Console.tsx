@@ -1,6 +1,7 @@
 import { ApiOutlined, AppstoreOutlined, BugOutlined, ClockCircleOutlined, CloudServerOutlined, DownOutlined, LogoutOutlined, UserOutlined } from '@ant-design/icons';
 import { Badge, Button, Dropdown, Layout, Menu, Select, Space, Tag } from 'antd';
 import { useEffect, useState } from 'react';
+import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import { useErrorHandler } from '../hooks';
 import ThemeSwitcher from '../theme/ThemeSwitcher';
@@ -23,7 +24,14 @@ export default function Console(props: {
   const handleError = useErrorHandler();
   const { me } = props;
   const isAdmin = me.role === 'admin';
-  const [view, setView] = useState<ViewKey>(isAdmin ? 'apps' : 'jobs');
+  // 路由驱动菜单:URL(/jobs 等) ↔ Menu 选中 ↔ 内容区。根 / 与未匹配均重定向到默认页。
+  const navigate = useNavigate();
+  const location = useLocation();
+  const home = isAdmin ? '/apps' : '/jobs';
+  const currentKey: ViewKey = (() => {
+    const seg = location.pathname.split('/')[1] as ViewKey;
+    return ['apps', 'jobs', 'instances', 'workers'].includes(seg) ? seg : (isAdmin ? 'apps' : 'jobs');
+  })();
   const [apps, setApps] = useState<AppView[]>([]);
   const [selectedAppId, setSelectedAppId] = useState<number | undefined>(me.app_id);
   const [appsLoading, setAppsLoading] = useState(false);
@@ -77,7 +85,7 @@ export default function Console(props: {
             <span>调度管理台</span>
           </div>
         </div>
-        <Menu mode="inline" theme="light" selectedKeys={[view]} onClick={({ key }) => setView(key as ViewKey)} items={menuItems} />
+        <Menu mode="inline" theme="light" selectedKeys={[currentKey]} onClick={({ key }) => navigate(`/${key}`)} items={menuItems} />
       </Sider>
       <Layout>
         <Header className="topbar">
@@ -129,12 +137,17 @@ export default function Console(props: {
           </Space>
         </Header>
         <Content className="content">
-          {view === 'apps' && isAdmin && <AppsView apps={apps} loading={appsLoading} onReload={loadApps} onError={handleError} />}
-          {view === 'jobs' && (
-            <JobsView appId={currentAppId} isAdmin={isAdmin} onError={handleError} />
-          )}
-          {view === 'instances' && <InstancesView appId={currentAppId} onError={handleError} />}
-          {view === 'workers' && <WorkersView appId={currentAppId} onError={handleError} />}
+          <Routes>
+            <Route path="/" element={<Navigate to={home} replace />} />
+            <Route
+              path="/apps"
+              element={isAdmin ? <AppsView apps={apps} loading={appsLoading} onReload={loadApps} onError={handleError} /> : <Navigate to={home} replace />}
+            />
+            <Route path="/jobs" element={<JobsView appId={currentAppId} isAdmin={isAdmin} onError={handleError} />} />
+            <Route path="/instances" element={<InstancesView appId={currentAppId} onError={handleError} />} />
+            <Route path="/workers" element={<WorkersView appId={currentAppId} onError={handleError} />} />
+            <Route path="*" element={<Navigate to={home} replace />} />
+          </Routes>
         </Content>
       </Layout>
       <AccountModal
