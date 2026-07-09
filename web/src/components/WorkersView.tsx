@@ -61,7 +61,7 @@ export default function WorkersView(props: { appId?: number; onError: (error: un
       width: 170,
       render: (_, r) =>
         r.jvm_max_memory && r.jvm_max_memory > 0
-          ? `${(r.jvm_used_memory ?? 0).toFixed(0)} / ${r.jvm_max_memory.toFixed(0)} MB (${((r.jvm_memory_usage ?? 0) * 100).toFixed(0)}%)`
+          ? `${(r.jvm_used_memory ?? 0).toFixed(1)} / ${r.jvm_max_memory.toFixed(1)} GB (${((r.jvm_memory_usage ?? 0) * 100).toFixed(0)}%)`
           : '-',
     },
     {

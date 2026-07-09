@@ -178,8 +178,8 @@ type WorkerView struct {
 	Score           int       `json:"score,omitempty"`         // 选址分(高=空闲)
 	CpuLoad         float64   `json:"cpu_load,omitempty"`
 	CpuProcessors   int       `json:"cpu_processors,omitempty"`
-	JvmMaxMemory    float64   `json:"jvm_max_memory,omitempty"`   // 最大内存(MB)
-	JvmUsedMemory   float64   `json:"jvm_used_memory,omitempty"`  // 已用内存(MB)
+	JvmMaxMemory    float64   `json:"jvm_max_memory,omitempty"`   // JVM 最大内存(GB,对齐 PowerJob SystemMetrics)
+	JvmUsedMemory   float64   `json:"jvm_used_memory,omitempty"`  // JVM 已用内存(GB)
 	JvmMemoryUsage  float64   `json:"jvm_memory_usage,omitempty"` // 内存使用率 0~1
 	DiskTotal       float64   `json:"disk_total,omitempty"`       // 磁盘总量(GB)
 	DiskUsed        float64   `json:"disk_used,omitempty"`        // 磁盘已用(GB)
