@@ -1,10 +1,13 @@
-import { DeleteOutlined, EditOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
-import { App as AntApp, Button, Form, Input, Modal, Popconfirm, Select, Space, Table, Tag, Tooltip, Typography } from 'antd';
+import { AppstoreOutlined, CalendarOutlined, CheckCircleOutlined, DeleteOutlined, EditOutlined, PauseCircleOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
+import { App as AntApp, Button, Form, Input, Modal, Popconfirm, Select, Space, Table, Tooltip, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
+import dayjs from 'dayjs';
 import { useState } from 'react';
 import { api } from '../api';
 import { compactObject, formatTime } from '../lib';
 import type { AppView } from '../types';
+import SectionCard from './SectionCard';
+import StatCard from './StatCard';
 
 const { Text, Title } = Typography;
 
@@ -59,6 +62,11 @@ export default function AppsView(props: {
     }
   };
 
+  // KPI 聚合(apps 由 Console 一次性 size=200 加载,视为全量)
+  const enabledCount = props.apps.filter((a) => a.status === 1).length;
+  const todayStart = dayjs().startOf('day');
+  const todayCount = props.apps.filter((a) => dayjs(a.created_at).isAfter(todayStart)).length;
+
   const columns: ColumnsType<AppView> = [
     {
       title: '应用',
@@ -75,16 +83,18 @@ export default function AppsView(props: {
       dataIndex: 'status',
       width: 100,
       render: (value: number) => (
-        <Tag color={value === 1 ? 'success' : 'default'} style={{ fontWeight: 500 }}>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+          <i style={{ width: 8, height: 8, borderRadius: '50%', background: value === 1 ? '#52c41a' : '#bfbfbf', display: 'inline-block' }} />
           {value === 1 ? '启用' : '禁用'}
-        </Tag>
+        </span>
       ),
     },
     { title: '创建时间', dataIndex: 'created_at', render: formatTime, width: 180 },
     { title: '更新时间', dataIndex: 'updated_at', render: formatTime, width: 180 },
     {
       title: '操作',
-      width: 160,
+      width: 120,
+      fixed: 'right',
       render: (_, record) => (
         <Space size="small">
           <Tooltip title="编辑">
@@ -111,12 +121,23 @@ export default function AppsView(props: {
           新建应用
         </Button>
       </div>
-      <div className="toolbar">
-        <Button icon={<ReloadOutlined />} onClick={props.onReload} loading={props.loading}>
-          刷新
-        </Button>
+      <div className="stat-row">
+        <StatCard label="应用总数" value={props.apps.length} icon={<AppstoreOutlined />} tint="#1677ff" loading={props.loading} />
+        <StatCard label="启用" value={enabledCount} hint={`占比 ${props.apps.length ? Math.round((enabledCount / props.apps.length) * 100) : 0}%`} icon={<CheckCircleOutlined />} tint="#52c41a" loading={props.loading} />
+        <StatCard label="禁用" value={props.apps.length - enabledCount} icon={<PauseCircleOutlined />} tint="#faad14" loading={props.loading} />
+        <StatCard label="今日新建" value={todayCount} icon={<CalendarOutlined />} tint="#722ed1" loading={props.loading} />
       </div>
-      <Table rowKey="id" columns={columns} dataSource={props.apps} loading={props.loading} pagination={false} scroll={{ x: 1000 }} />
+      <SectionCard
+        title="应用列表"
+        sub={`共 ${props.apps.length} 个`}
+        extra={
+          <Button icon={<ReloadOutlined />} onClick={props.onReload} loading={props.loading}>
+            刷新
+          </Button>
+        }
+      >
+        <Table rowKey="id" columns={columns} dataSource={props.apps} loading={props.loading} pagination={false} scroll={{ x: 1000 }} />
+      </SectionCard>
 
       <Modal title={editingApp ? '编辑应用' : '新建应用'} open={modalOpen} onOk={submit} onCancel={() => setModalOpen(false)} destroyOnHidden>
         <Form form={form} layout="vertical">

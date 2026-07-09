@@ -54,7 +54,7 @@ body {
 
 .brand strong {
   font-size: 15px;
-  font-weight: 500;
+  font-weight: 600;
   letter-spacing: -0.01em;
 }
 
@@ -96,14 +96,14 @@ body {
   justify-content: space-between;
   align-items: flex-start;
   gap: 32px;
-  margin-bottom: 28px;
+  margin-bottom: 24px;
 }
 
 .view-head h3 {
   margin: 0 0 8px;
-  font-family: 'Playfair Display', Georgia, serif;
-  font-weight: 400;
-  font-size: 32px;
+  font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-weight: 600;
+  font-size: 26px;
   letter-spacing: -0.02em;
 }
 
@@ -131,9 +131,7 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-bottom: 20px;
-  padding: 20px 24px;
-  border-radius: 12px;
+  margin-bottom: 16px;
 }
 
 .toolbar-search {
@@ -216,9 +214,9 @@ body {
 }
 
 .login-brand strong {
-  font-family: 'Playfair Display', Georgia, serif;
+  font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   font-size: 22px;
-  font-weight: 400;
+  font-weight: 600;
   letter-spacing: -0.01em;
 }
 
@@ -252,6 +250,184 @@ body {
   word-break: break-all;
   max-height: 70vh;
   overflow: auto;
+}
+
+/* =====================================================================
+   现代极简卡片风:统计卡 / 状态分布 / 资源条 / 区块卡片
+   颜色一律用 opacity(基于文字色派生)或由组件 inline 注入,确保跨 7 套主题自动适配。
+   ===================================================================== */
+
+/* 区块卡片:统一包裹表格,标题 + 操作在顶部 */
+.section-card {
+  margin-bottom: 20px;
+  overflow: hidden;
+}
+.section-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.section-card-head .title-block h4 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.section-card-head .title-block .sub {
+  margin-top: 2px;
+  font-size: 12px;
+  opacity: 0.55;
+}
+.section-card .ant-table {
+  /* 表格嵌在 Card 里时去掉外层圆角/边框的双重描边 */
+  border-radius: 0;
+}
+
+/* 统计卡行:自适应网格 */
+.stat-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.stat-card .stat-inner {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.stat-card .stat-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.stat-card .stat-label {
+  font-size: 13px;
+  opacity: 0.6;
+}
+.stat-card .stat-value {
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1;
+}
+.stat-card .stat-value .unit {
+  font-size: 14px;
+  font-weight: 400;
+  opacity: 0.55;
+  margin-left: 2px;
+}
+.stat-card .stat-hint {
+  font-size: 12px;
+  opacity: 0.5;
+}
+.stat-card .stat-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  font-size: 18px;
+}
+
+/* 状态分布条 */
+.dist {
+  margin-bottom: 20px;
+}
+.dist-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.dist-head .label {
+  font-size: 13px;
+  opacity: 0.6;
+}
+.dist-head .total {
+  font-size: 12px;
+  opacity: 0.5;
+}
+.dist-bar {
+  display: flex;
+  width: 100%;
+  height: 10px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: rgba(128, 128, 128, 0.14);
+}
+.dist-seg {
+  height: 100%;
+  min-width: 2px;
+  transition: width 0.3s ease;
+}
+.dist-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 20px;
+  margin-top: 14px;
+}
+.dist-legend .item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.dist-legend .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+.dist-legend .cnt {
+  font-weight: 600;
+}
+.dist-legend .pct {
+  opacity: 0.5;
+  font-size: 12px;
+}
+
+/* Worker 资源条单元格:三条紧凑进度条竖排 */
+.res-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 130px;
+}
+.res-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.res-row .res-name {
+  font-size: 11px;
+  opacity: 0.5;
+  width: 26px;
+  flex: none;
+}
+.res-row .ant-progress {
+  flex: 1;
+  margin: 0;
+}
+.res-row .res-val {
+  font-size: 11px;
+  opacity: 0.7;
+  width: 78px;
+  flex: none;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 顶栏信息分组分隔 */
+.topbar-group {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 @media (max-width: 900px) {
