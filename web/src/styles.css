@@ -14,17 +14,20 @@ body {
 }
 
 .shell {
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
 }
 
 .side {
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
 }
 
 /* Sider 内部用 flex 列布局:brand 固定高度,Menu 撑满剩余高度,使菜单背景填满侧栏底部并跟随主题。 */
 .side .ant-layout-sider-children {
   display: flex;
   flex-direction: column;
+  height: 100%;
 }
 .side .brand {
   flex: none;
@@ -32,6 +35,7 @@ body {
 .side .ant-menu {
   flex: 1 1 auto;
   min-height: 0;
+  overflow-y: auto;
 }
 
 .brand {
@@ -85,6 +89,9 @@ body {
 .content {
   width: 100%;
   padding: 24px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .view {

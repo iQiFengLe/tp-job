@@ -157,7 +157,7 @@ export default function InstancesView(props: { appId?: number; onError: (error: 
     { title: '触发时间', dataIndex: 'trigger_time', render: formatTime, width: 180 },
     {
       title: '操作',
-      width: 180,
+      width: 125,
       fixed: 'right',
       render: (_, record) => (
         <Space size="small">
