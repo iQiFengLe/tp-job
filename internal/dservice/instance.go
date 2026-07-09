@@ -15,6 +15,8 @@ import (
 
 var ErrInstanceNotFound = errors.New("实例不存在")
 var ErrInstanceValidate = errors.New("实例参数校验失败")
+// ErrInstanceNotRetryable 实例当前不可重试(状态非 failed/timeout,或无重试余力)。属业务校验,映射 HTTP 400。
+var ErrInstanceNotRetryable = errors.New("实例当前不可重试")
 
 // InstanceService 实例业务:状态上报(终态守护 + 释放槽)、查询、日志读取。
 type InstanceService struct {
@@ -171,14 +173,14 @@ func (s *InstanceService) Retry(id int64) error {
 		return err
 	}
 	if !domain.StatusRetryable(ins.Status) {
-		return fmt.Errorf("仅 failed/timeout 实例可重试,当前状态: %s", ins.Status)
+		return fmt.Errorf("%w: 仅 failed/timeout 实例可重试,当前状态: %s", ErrInstanceNotRetryable, ins.Status)
 	}
 	job, err := s.st.Job.Get(ins.AppID, ins.JobID)
 	if err != nil {
 		return errors.New("job 不存在,无法重试")
 	}
 	if job.RetryCount <= 0 || ins.RetryIndex >= job.RetryCount {
-		return fmt.Errorf("实例无重试余力(retry_index=%d, retry_count=%d)", ins.RetryIndex, job.RetryCount)
+		return fmt.Errorf("%w: 实例无重试余力(retry_index=%d, retry_count=%d)", ErrInstanceNotRetryable, ins.RetryIndex, job.RetryCount)
 	}
 	return s.st.Instance.SetNextRetryTime(id, time.Now())
 }

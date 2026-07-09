@@ -1,5 +1,5 @@
-import { FileTextOutlined, InfoCircleOutlined, ReloadOutlined } from '@ant-design/icons';
-import { Button, InputNumber, Select, Space, Table, Tag, Tooltip, Typography } from 'antd';
+import { FileTextOutlined, InfoCircleOutlined, RedoOutlined, ReloadOutlined, StopOutlined } from '@ant-design/icons';
+import { App as AntApp, Button, InputNumber, Popconfirm, Select, Space, Table, Tag, Tooltip, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useEffect, useState } from 'react';
 import { api } from '../api';
@@ -12,6 +12,11 @@ import LogsDrawer from './LogsDrawer';
 
 const { Text, Title } = Typography;
 
+// 终态实例不可停止(已无在飞槽位);仅 failed/timeout 可重试。与后端 InstanceService.Stop/Retry 语义对齐。
+const TERMINAL_STATUSES = ['success', 'failed', 'timeout', 'skipped', 'canceled', 'stopped'];
+const isStoppable = (s: string) => !TERMINAL_STATUSES.includes(s);
+const isRetryable = (s: string) => s === 'failed' || s === 'timeout';
+
 export default function InstancesView(props: { appId?: number; onError: (error: unknown) => void }) {
   const [list, setList] = useState<InstanceView[]>([]);
   const [total, setTotal] = useState(0);
@@ -23,6 +28,7 @@ export default function InstancesView(props: { appId?: number; onError: (error: 
   const [logTitle, setLogTitle] = useState('');
   const [logOpen, setLogOpen] = useState(false);
   const [detailInstance, setDetailInstance] = useState<InstanceView>();
+  const { message } = AntApp.useApp();
 
   const load = async (p = page, s = size) => {
     if (!props.appId) return;
@@ -56,11 +62,34 @@ export default function InstancesView(props: { appId?: number; onError: (error: 
     }
   };
 
+  const stopInstance = async (instance: InstanceView) => {
+    if (!props.appId) return;
+    try {
+      await api.instances.stop(props.appId, instance.id);
+      message.success(`实例 ${instance.id} 已停止`);
+      load();
+    } catch (error) {
+      props.onError(error);
+    }
+  };
+
+  const retryInstance = async (instance: InstanceView) => {
+    if (!props.appId) return;
+    try {
+      await api.instances.retry(props.appId, instance.id);
+      message.success(`实例 ${instance.id} 已重新加入重试队列`);
+      load();
+    } catch (error) {
+      props.onError(error);
+    }
+  };
+
   const columns: ColumnsType<InstanceView> = [
     { title: '实例 ID', dataIndex: 'id', width: 100 },
     { title: 'Job ID', dataIndex: 'job_id', width: 100 },
     { title: '调度类型', dataIndex: 'schedule_kind', width: 110, render: (v: string) => scheduleKindOptions.find((o) => o.value === v)?.label || v || '-' },
     { title: '触发', dataIndex: 'trigger_type', width: 100, render: (v: string) => triggerTypeLabel[v] || v || '-' },
+    { title: '优先级', dataIndex: 'priority', width: 80, render: (v?: number) => (v ? <Tag color="blue">{v}</Tag> : '-') },
     { title: '重试', dataIndex: 'retry_index', width: 80, render: (v) => v || 0 },
     {
       title: '状态',
@@ -77,7 +106,7 @@ export default function InstancesView(props: { appId?: number; onError: (error: 
     { title: '触发时间', dataIndex: 'trigger_time', render: formatTime, width: 180 },
     {
       title: '操作',
-      width: 110,
+      width: 260,
       render: (_, record) => (
         <Space size="small">
           <Tooltip title="详情">
@@ -86,6 +115,20 @@ export default function InstancesView(props: { appId?: number; onError: (error: 
           <Tooltip title="查看日志">
             <Button size="small" icon={<FileTextOutlined />} onClick={() => openLogs(record)} />
           </Tooltip>
+          {isStoppable(record.status) && (
+            <Popconfirm title={`停止实例 ${record.id}?`} onConfirm={() => stopInstance(record)}>
+              <Button size="small" danger icon={<StopOutlined />}>
+                停止
+              </Button>
+            </Popconfirm>
+          )}
+          {isRetryable(record.status) && (
+            <Popconfirm title={`重试实例 ${record.id}?`} onConfirm={() => retryInstance(record)}>
+              <Button size="small" type="primary" ghost icon={<RedoOutlined />}>
+                重试
+              </Button>
+            </Popconfirm>
+          )}
         </Space>
       ),
     },
@@ -125,7 +168,7 @@ export default function InstancesView(props: { appId?: number; onError: (error: 
         className="table-container"
         dataSource={list}
         loading={loading}
-        scroll={{ x: 1400 }}
+        scroll={{ x: 1650 }}
         pagination={{
           current: page,
           pageSize: size,

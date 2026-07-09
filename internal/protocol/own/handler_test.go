@@ -211,3 +211,58 @@ func TestOwnInstanceCrossAppDenied(t *testing.T) {
 		t.Fatalf("跨 app 读日志应 404, got %d: %s", w.Code, w.Body.String())
 	}
 }
+
+// stopInstance / retryInstance:stop 把 queued→stopped;retry 仅 failed/timeout 可重试(否则 400);跨 app 404。
+func TestOwnInstanceStopRetry(t *testing.T) {
+	d, st := newDeps(t)
+
+	wa := req(t, "POST", "/api/apps", CreateAppReq{AppName: "a", Password: "p"}, d)
+	appID := int64(bodyData(t, wa)["data"].(map[string]any)["id"].(float64))
+	wa2 := req(t, "POST", "/api/apps", CreateAppReq{AppName: "a2", Password: "p"}, d)
+	a2 := int64(bodyData(t, wa2)["data"].(map[string]any)["id"].(float64))
+
+	// job(retry_count=3,留重试余力) + 触发 → queued 实例(无 worker 不派出)
+	wj := req(t, "POST", "/api/apps/"+itoa(appID)+"/jobs",
+		CreateJobReq{Name: "j", ScheduleKind: "api", RetryCount: 3}, d)
+	if wj.Code != http.StatusOK {
+		t.Fatalf("createJob 应 200, got %d: %s", wj.Code, wj.Body.String())
+	}
+	jobID := int64(bodyData(t, wj)["data"].(map[string]any)["id"].(float64))
+	req(t, "POST", "/api/apps/"+itoa(appID)+"/jobs/"+itoa(jobID)+"/trigger", nil, d)
+	wl := req(t, "GET", "/api/apps/"+itoa(appID)+"/instances", nil, d)
+	list := bodyData(t, wl)["data"].(map[string]any)["list"].([]any)
+	insID := int64(list[0].(map[string]any)["id"].(float64))
+
+	// 1. retry queued 实例 → 400(非 failed/timeout)
+	if w := req(t, "POST", "/api/apps/"+itoa(appID)+"/instances/"+itoa(insID)+"/retry", nil, d); w.Code != http.StatusBadRequest {
+		t.Fatalf("queued 不可重试应 400, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// 2. stop queued 实例 → 200,状态变 stopped
+	if w := req(t, "POST", "/api/apps/"+itoa(appID)+"/instances/"+itoa(insID)+"/stop", nil, d); w.Code != http.StatusOK {
+		t.Fatalf("stop 应 200, got %d: %s", w.Code, w.Body.String())
+	}
+	wg := req(t, "GET", "/api/apps/"+itoa(appID)+"/instances/"+itoa(insID), nil, d)
+	if bodyData(t, wg)["data"].(map[string]any)["status"] != "stopped" {
+		t.Fatalf("stop 后状态应 stopped, got %v", bodyData(t, wg)["data"].(map[string]any)["status"])
+	}
+
+	// 3. retry stopped 实例 → 仍 400(非 failed/timeout)
+	if w := req(t, "POST", "/api/apps/"+itoa(appID)+"/instances/"+itoa(insID)+"/retry", nil, d); w.Code != http.StatusBadRequest {
+		t.Fatalf("canceled 不可重试应 400, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// 4. retry failed 实例(retry_index=0 < 3,有余力)→ 200。直接造一个 failed 实例。
+	ins2 := &domain.Instance{AppID: appID, JobID: jobID, Status: domain.StatusFailed, TriggerType: "manual", RetryIndex: 0}
+	if err := st.Instance.Create(ins2); err != nil {
+		t.Fatalf("造 failed 实例失败: %v", err)
+	}
+	if w := req(t, "POST", "/api/apps/"+itoa(appID)+"/instances/"+itoa(ins2.ID)+"/retry", nil, d); w.Code != http.StatusOK {
+		t.Fatalf("failed 可重试应 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// 5. 跨 app stop app1 的实例 → 404(归属校验,GetInApp)
+	if w := req(t, "POST", "/api/apps/"+itoa(a2)+"/instances/"+itoa(ins2.ID)+"/stop", nil, d); w.Code != http.StatusNotFound {
+		t.Fatalf("跨 app stop 应 404, got %d: %s", w.Code, w.Body.String())
+	}
+}

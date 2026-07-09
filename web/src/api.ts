@@ -141,6 +141,10 @@ export const api = {
       request<InstanceView>(`/api/apps/${appId}/instances/${iid}`),
     logs: (appId: number, iid: number, params: { offset?: number; limit?: number }) =>
       request<LogResult>(`/api/apps/${appId}/instances/${iid}/logs${qs(params)}`),
+    stop: (appId: number, iid: number) =>
+      request<{ id: number }>(`/api/apps/${appId}/instances/${iid}/stop`, { method: 'POST' }),
+    retry: (appId: number, iid: number) =>
+      request<{ id: number }>(`/api/apps/${appId}/instances/${iid}/retry`, { method: 'POST' }),
   },
 
   workers: {

@@ -69,6 +69,8 @@ func ownRoutes(d Deps) []routeDef {
 
 		{"GET", "/apps/:appId/instances", d.listInstances, false},
 		{"GET", "/apps/:appId/instances/:iid", d.getInstance, false},
+		{"POST", "/apps/:appId/instances/:iid/stop", d.stopInstance, false},
+		{"POST", "/apps/:appId/instances/:iid/retry", d.retryInstance, false},
 		{"GET", "/apps/:appId/instances/:iid/logs", d.instanceLogs, false},
 
 		{"GET", "/apps/:appId/workers", d.listWorkers, false},
@@ -351,6 +353,36 @@ func (d Deps) instanceLogs(c *gin.Context) {
 	ok(c, gin.H{"lines": lines, "total": total})
 }
 
+// stopInstance POST /apps/:appId/instances/:iid/stop:标记 stopped 并释放并发槽(停止排队/运行中实例)。
+// 先 GetInApp 校验 :iid 归属当前 app(AppScope 只验 :appId 路径,不验 :iid),防 app 角色越权操作他 app 实例。
+func (d Deps) stopInstance(c *gin.Context) {
+	iid := paramInt64(c, "iid")
+	if _, err := d.Instances.GetInApp(paramInt64(c, "appId"), iid); err != nil {
+		fail(c, notFoundStatus(err), err.Error())
+		return
+	}
+	if err := d.Instances.Stop(iid); err != nil {
+		fail(c, badStatus(err), err.Error())
+		return
+	}
+	ok(c, gin.H{"id": iid})
+}
+
+// retryInstance POST /apps/:appId/instances/:iid/retry:立即重排一个 failed/timeout 实例(交 RetryPump)。
+// 归属校验同 cancelInstance;非可重试态/无余力返回 400(ErrInstanceNotRetryable)。
+func (d Deps) retryInstance(c *gin.Context) {
+	iid := paramInt64(c, "iid")
+	if _, err := d.Instances.GetInApp(paramInt64(c, "appId"), iid); err != nil {
+		fail(c, notFoundStatus(err), err.Error())
+		return
+	}
+	if err := d.Instances.Retry(iid); err != nil {
+		fail(c, badStatus(err), err.Error())
+		return
+	}
+	ok(c, gin.H{"id": iid})
+}
+
 // ===== Worker =====
 
 // listWorkers 列出 app 名下在线 worker(读 workerreg 内存注册表;不入库)。
@@ -405,7 +437,7 @@ func parsePage(c *gin.Context) (int, int) {
 func badStatus(err error) int {
 	switch {
 	case isSentinel(err, dservice.ErrAppValidate), isSentinel(err, dservice.ErrJobValidate),
-		isSentinel(err, dservice.ErrInstanceValidate):
+		isSentinel(err, dservice.ErrInstanceValidate), isSentinel(err, dservice.ErrInstanceNotRetryable):
 		return http.StatusBadRequest
 	case isSentinel(err, dservice.ErrAppInUse):
 		return http.StatusConflict
