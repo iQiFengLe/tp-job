@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/glebarez/sqlite"
@@ -49,26 +50,29 @@ func OpenDatabase(cfg config.Database) (*gorm.DB, error) {
 				return nil, fmt.Errorf("创建数据库目录失败: %w", err)
 			}
 		}
-		db, err := gorm.Open(sqlite.Open(cfg.SQLite.Path), gormCfg)
+		// PRAGMA 走 DSN query 参数:glebarez/modernc 在每个新连接初始化时执行 _pragma,
+		// 保证池里每条连接都带 busy_timeout / foreign_keys / WAL。这些是连接级 PRAGMA
+		// (只对当前连接生效),不能靠开池后 db.Exec 跑一次——那只命中第一个连接,后续新连接
+		// 默认无 busy_timeout(写竞争直接 database is locked)、无外键约束。
+		sep := "?"
+		if strings.Contains(cfg.SQLite.Path, "?") {
+			sep = "&"
+		}
+		dsn := cfg.SQLite.Path + sep + "_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)&_pragma=journal_mode(WAL)"
+		db, err := gorm.Open(sqlite.Open(dsn), gormCfg)
 		if err != nil {
 			return nil, fmt.Errorf("打开 sqlite 失败: %w", err)
 		}
-		// SQLite 是单写者模型:连接池限制为 1,保证写串行,避免调度器高并发触发下
-		// 多个连接竞争写锁而频繁 "database is locked"。读也随之串行——对本服务读写比可接受,
-		// 可靠性优先于吞吐。
 		sqlDB, err := db.DB()
 		if err != nil {
 			return nil, fmt.Errorf("获取底层 sqlDB 失败: %w", err)
 		}
-		sqlDB.SetMaxOpenConns(1)
-		sqlDB.SetMaxIdleConns(1)
-		// 开启 WAL 与忙等待,提升并发读写性能。PRAGMA 正常不失败;失败不阻断启动
-		// (此时全局 slog 尚未就绪),用标准 log 记录以便排查。
-		for _, p := range []string{"PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=5000", "PRAGMA foreign_keys=ON"} {
-			if res := db.Exec(p); res.Error != nil {
-				log.Printf("sqlite 执行 %q 失败: %v", p, res.Error)
-			}
-		}
+		// WAL 模型:多读并发 + 单写者串行。写连接竞争写锁时由 busy_timeout(5s) 排队等,
+		// 不再用 MaxOpenConns=1 强制读串行。连接数由配置控制(默认 8):读并发受益,写仍单写者,
+		// 开太多只增加排队、无吞吐收益。⚠ 事务内严禁用根 db 再查——见 instance WithCallback
+		// 注释(多连接下会拿到池里另一连接,读不到事务未提交数据,破坏隔离)。
+		sqlDB.SetMaxOpenConns(cfg.SQLite.MaxOpenConns)
+		sqlDB.SetMaxIdleConns(cfg.SQLite.MaxOpenConns) // idle=open,避免空闲回收后重建连接反复跑 PRAGMA
 		return db, nil
 	default:
 		return nil, fmt.Errorf("不支持的数据库驱动: %s", cfg.Driver)

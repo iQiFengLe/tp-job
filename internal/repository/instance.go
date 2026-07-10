@@ -266,10 +266,11 @@ func (s InstanceStore) ListUnboundQueued(staleThreshold time.Duration) ([]domain
 // 是事件瞬间 DB 真实值(避免"读快照构造 cb 期间并发改 DB"的 TOCTOU 致 payload stale)。返回
 // RowsAffected:status 实际变化(匹配 WHERE)才 >0,调用方据此判断是否真事件。
 //
-// ⚠ build 闭包在事务内执行,严禁内部用根 db(s.st.* / 任何非 tx 的 DB 句柄)再查——会重入申请新连接,
-// SQLite MaxOpenConns=1 下唯一连接已被本事务占着,自己等自己 → 死锁(曾因 statusCallback 闭包内
-// s.st.Job.Get 导致 reportInstanceStatus 一触发即整服务卡死)。闭包需要的数据(如 job)必须在事务外
-// 预查,通过闭包变量传入,闭包内只用 latest(tx 给的)+ 预查值构造 callback。
+// ⚠ build 闭包在事务内执行,严禁内部用根 db(s.st.* / 任何非 tx 的 DB 句柄)再查——会从连接池
+// 拿到另一条连接,该查询不在本事务内,读不到事务未提交的数据,破坏隔离/TOCTOU(MaxOpenConns=1 时代
+// 是直接死锁——唯一连接被事务占着自己等自己,曾因 statusCallback 闭包内 s.st.Job.Get 导致
+// reportInstanceStatus 一触发即整服务卡死;现多连接虽不再卡死,但读旧值更隐蔽)。闭包需要的数据(如 job)
+// 必须在事务外预查,通过闭包变量传入,闭包内只用 latest(tx 给的)+ 预查值构造 callback。
 //
 // build==nil(回调未启用 Noop)时:CreateWithCallback/MarkDispatchedWithCallback/SetStatusWithCallback
 // 走原无回调快捷路径(免事务开销);UpdateResultWithCallback/FailDispatchWithCallback 仍走事务以返回

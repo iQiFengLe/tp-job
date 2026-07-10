@@ -10,6 +10,7 @@ database:
   driver: sqlite         # sqlite | mysql(生产高负载建议 mysql)
   sqlite:
     path: ./data/task-schedule.db
+    max_open_conns: 8  # 连接池上限;WAL 下读并发、写串行(busy_timeout 排队)。写是单写者,开太大只增排队无收益
   mysql:
     # 示例值:生产请改用最小权限账号 + 强密码,或用环境变量 TASK_SCHEDULE_MYSQL_DSN 注入。
     dsn: "root:root@tcp(127.0.0.1:3306)/task_schedule?charset=utf8mb4&parseTime=True&loc=Local"

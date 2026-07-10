@@ -86,9 +86,10 @@ func (s *InstanceService) statusCallback(id int64, status, result string) func(*
 		return nil
 	}
 	// ⚠ job 必须在事务外预查:build 闭包在 *WithCallback 事务回调内被调用,若闭包内用 s.st.Job
-	// (根 db)查 job 会重入申请新连接——SQLite MaxOpenConns=1 下唯一连接已被本事务占着,
-	// 自己等自己 → 死锁(曾导致 reportInstanceStatus 一触发即整服务卡死、Ctrl+C 都关不掉)。
-	// instance.AppID/JobID 创建后不可变,事务前查与事务内 latest 同值,无 TOCTOU。
+	// (根 db)查 job 会从连接池拿到另一条连接——该查询不在本事务内,读不到事务未提交数据,破坏隔离
+	// (MaxOpenConns=1 时代是直接死锁:唯一连接被事务占着自己等自己,曾导致 reportInstanceStatus
+	// 一触发即整服务卡死、Ctrl+C 都关不掉;现多连接不再卡死,但读旧值更隐蔽)。instance.AppID/JobID
+	// 创建后不可变,事务前查与事务内 latest 同值,无 TOCTOU。
 	job, _ := s.st.Job.Get(ins.AppID, ins.JobID)
 	return func(latest *domain.Instance) *domain.Callback {
 		return s.cbBuilder.Build(latest, job, status)

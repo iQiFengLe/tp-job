@@ -29,7 +29,8 @@ type Config struct {
 type Database struct {
 	Driver string `yaml:"driver"` // sqlite | mysql
 	SQLite struct {
-		Path string `yaml:"path"`
+		Path         string `yaml:"path"`
+		MaxOpenConns int    `yaml:"max_open_conns"` // 连接池上限;WAL 下读并发、写串行(busy_timeout 排队),默认 8
 	} `yaml:"sqlite"`
 	MySQL struct {
 		DSN          string `yaml:"dsn"`
@@ -157,6 +158,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Database.SQLite.Path == "" {
 		c.Database.SQLite.Path = "./data/task-schedule.db"
+	}
+	if c.Database.SQLite.MaxOpenConns == 0 {
+		c.Database.SQLite.MaxOpenConns = 8
 	}
 	if c.Database.MySQL.MaxOpenConns == 0 {
 		c.Database.MySQL.MaxOpenConns = 50
