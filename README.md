@@ -215,6 +215,8 @@ compose 经 `config.release.yaml` 设 release + 登录限流;镜像内 `//go:emb
 
 ## 主要 API
 
+> 完整接口文档(请求/响应字段、鉴权、PowerJob 兼容端点)见 [`docs/API.md`](docs/API.md)。下表为速查。
+
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/api/auth/login` | 登录(admin/app),返 Bearer token |
