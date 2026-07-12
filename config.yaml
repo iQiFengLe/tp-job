@@ -64,6 +64,10 @@ pprof:
   enabled: false              # 默认关;诊断时改 true
   listen: "127.0.0.1:6060"    # 抓栈地址;本机留 127.0.0.1,远程抓栈改 0.0.0.0:6060(⚠ 仅可信网络)
 
+# 调试便利开关(仅本地/开发;生产 release 配置须全部关闭)。未配置=安全默认(关闭)。
+debug:
+  auto_login: true   # 前端无 token 时匿名用默认账户 admin/admin123 自动登录(免开发手输)。生产必须 false
+
 # 环境变量(优先级高于本文件,便于容器/CI 注入,避免明文落盘):
 #   TASK_SCHEDULE_DB_DRIVER               → database.driver (sqlite|mysql)
 #   TASK_SCHEDULE_MYSQL_DSN               → database.mysql.dsn

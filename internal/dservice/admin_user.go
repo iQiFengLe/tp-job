@@ -21,9 +21,10 @@ var (
 )
 
 // 默认 seed 账户(首次启动表空时种入)。取代旧 config 占位 admin/change-me-admin。
+// 导出供 auto-login 端点复用(开发便利:debug.auto_login 开启时用这组凭据匿名登入)。
 const (
-	defaultAdminUsername = "admin"
-	defaultAdminPassword = "admin123"
+	DefaultAdminUsername = "admin"
+	DefaultAdminPassword = "admin123"
 
 	adminUsernameMinLen = 3
 	adminUsernameMaxLen = 64
@@ -50,7 +51,7 @@ func (s *AdminUserService) SeedDefault() error {
 	if n > 0 {
 		return nil
 	}
-	return s.create(defaultAdminUsername, defaultAdminPassword)
+	return s.create(DefaultAdminUsername, DefaultAdminPassword)
 }
 
 // create 校验 + bcrypt 哈希 + 入库。仅 SeedDefault 内部用(不接受外部任意创建,账户管理范围

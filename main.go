@@ -337,6 +337,7 @@ func buildRouter(d routerDeps) *gin.Engine {
 	// /api:登录公开;me/logout 与资源路由各自前置 SessionAuth(在 own 内部按矩阵挂)。
 	api := r.Group("/api")
 	api.POST("/auth/login", own.LoginRateLimit(d.cfg.Auth.Login.MaxAttemptsPerMin), own.LoginHandler(d.loginSvc))
+	api.POST("/auth/auto-login", own.LoginRateLimit(d.cfg.Auth.Login.MaxAttemptsPerMin), own.AutoLoginHandler(d.loginSvc, d.cfg.Debug.AutoLogin))
 	own.RegisterAuth(api, own.Deps{Auth: d.authStore, AdminUsers: d.adminUserSvc})
 	own.Register(api, own.Deps{
 		Apps: d.appSvc, Jobs: d.jobSvc, Instances: d.insSvc,

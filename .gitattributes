@@ -1,0 +1,10 @@
+# Shell 脚本强制 LF:Windows 上 core.autocrlf 默认会把 LF 转 CRLF,
+# 推到 Linux 部署时 /bin/bash\r 会触发 "bad interpreter" 导致 start.sh/stop.sh 执行失败。
+*.sh text eol=lf
+
+# Dockerfile / compose 同样交给 Linux 容器,统一 LF 更稳。
+Dockerfile        text eol=lf
+*.dockerfile      text eol=lf
+docker-compose*.yml text eol=lf
+*.yaml            text eol=lf
+*.yml             text eol=lf

@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"task-schedule/internal/auth"
+	"task-schedule/internal/dservice"
 )
 
 // ===== 鉴权 DTO / 端点 =====
@@ -49,6 +50,31 @@ func LoginHandler(login *auth.LoginService) gin.HandlerFunc {
 			return
 		}
 		sess, err := login.Login(req.Ident, req.Password)
+		if err != nil {
+			fail(c, http.StatusUnauthorized, err.Error())
+			return
+		}
+		ok(c, LoginResp{
+			Token: sess.Token, Role: string(sess.Role), Username: sess.Username,
+			AppID: sess.AppID, AppName: sess.AppName, ExpiresAt: sess.ExpiresAt,
+		})
+	}
+}
+
+// AutoLoginHandler 公开端点(POST /api/auth/auto-login)。仅本地调试便利:enabled=true 时用默认
+// 管理员账户(dservice 导出的 seed 凭据)登录,前端无 token 即可进控制台,免手输。
+//
+// 安全边界:enabled=false 直接 401(在 bcrypt 之前,零开销,生产 release 模式如此);enabled=true
+// 时走 LoginService 真实校验——默认账户密码若已被 Web 改掉,本端点自然 401(登录页兜底),不因
+// 开关开启而绕过。⚠ enabled 仅由 config 的 debug.auto_login 决定,生产必须 false,否则任何人
+// 可匿名登入。端点复用登录限流(按 ClientIP),防 debug 误暴露时被刷。
+func AutoLoginHandler(login *auth.LoginService, enabled bool) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !enabled {
+			fail(c, http.StatusUnauthorized, "自动登录未启用")
+			return
+		}
+		sess, err := login.Login(dservice.DefaultAdminUsername, dservice.DefaultAdminPassword)
 		if err != nil {
 			fail(c, http.StatusUnauthorized, err.Error())
 			return

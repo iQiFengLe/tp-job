@@ -24,6 +24,7 @@ type Config struct {
 	Worker    Worker    `yaml:"worker"`
 	PowerJob  PowerJob  `yaml:"powerjob"`
 	Pprof     Pprof     `yaml:"pprof"`
+	Debug     Debug     `yaml:"debug"`
 }
 
 type Database struct {
@@ -86,6 +87,15 @@ type PowerJob struct {
 type Pprof struct {
 	Enabled bool   `yaml:"enabled"` // 是否启用;默认 false
 	Listen  string `yaml:"listen"`  // 监听地址 host:port;默认 127.0.0.1:6060
+}
+
+// Debug 调试便利开关。仅供本地/开发环境,生产(release)必须全部关闭。
+// 字段零值即"关闭"——未显式配置时默认安全(不开放任何便利特性)。
+type Debug struct {
+	// AutoLogin 是否启用 POST /api/auth/auto-login 端点:开启时,前端无 token 可匿名用默认管理员
+	// 账户(admin/admin123)自动登录,免开发手输。⚠ 仅本地调试:生产必须 false,否则任何人可匿名登入
+	// (即便登录限流 + 首登改密,也等于把登录页向公网敞开)。未配置=false。
+	AutoLogin bool `yaml:"auto_login"`
 }
 
 // Auth 管理端鉴权配置:登录会话参数 + 登录端点限流。管理员账户走 admin_user 表

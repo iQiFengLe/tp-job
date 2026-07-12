@@ -89,6 +89,7 @@ export const api = {
   auth: {
     login: (values: LoginReq) =>
       request<LoginResp>('/api/auth/login', { method: 'POST', body: JSON.stringify(values) }),
+    autoLogin: () => request<LoginResp>('/api/auth/auto-login', { method: 'POST' }),
     me: () => request<MeResp>('/api/auth/me'),
     logout: () => request<{ logged_out: boolean }>('/api/auth/logout', { method: 'POST' }),
   },

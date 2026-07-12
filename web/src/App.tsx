@@ -20,12 +20,13 @@ export default function App() {
     return () => setUnauthorizedHandler(null);
   }, []);
 
-  // 启动:有 token 则 me() 校验,失效回退自动登录;无 token 直接自动登录(开发便利;
-  // 生产环境会被 release 模式"拒默认密码"或登录限流挡住,失败回退到手动登录页)
+  // 启动:有 token 则 me() 校验,失效回退自动登录;无 token 直接自动登录。
+  // 自动登录由后端 debug.auto_login 开关控制(开发配置默认开,生产 release 配置关)——
+  // 关闭时 /api/auth/auto-login 返 401,前端回退到手动登录页。前端不持有任何凭据。
   useEffect(() => {
     const autoLogin = () =>
       api.auth
-        .login({ ident: 'admin', password: 'admin123' })
+        .autoLogin()
         .then((resp) => {
           saveToken(resp.token);
           setToken(resp.token);

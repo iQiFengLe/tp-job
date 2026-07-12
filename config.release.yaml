@@ -57,5 +57,9 @@ pprof:
   enabled: false
   listen: "127.0.0.1:6060"
 
+# 调试便利开关:生产必须全部关闭(未配置=关闭,此处显式 false 表态)。
+debug:
+  auto_login: false   # 生产关闭前端自动登录,任何人必须经登录页手输凭据
+
 # 环境变量(优先级高于本文件):TASK_SCHEDULE_DB_DRIVER / TASK_SCHEDULE_MYSQL_DSN / TASK_SCHEDULE_POWERJOB_SERVER_ADDRESS
 # server.mode 不支持 env 覆盖。

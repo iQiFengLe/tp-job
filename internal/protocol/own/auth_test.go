@@ -147,3 +147,23 @@ func TestOwnAuthMatrix(t *testing.T) {
 	wantCode(t, "logout", authReq(t, g, "POST", "/api/auth/logout", nil, appTok), 200)
 	wantCode(t, "logout 后 me", authReq(t, g, "GET", "/api/auth/me", nil, appTok), 401)
 }
+
+// TestAutoLoginHandler debug.auto_login 开关:enabled=true → 默认账户登入(200,role=admin);
+// enabled=false → 端点 401(在登录校验之前,零 bcrypt 开销)。默认账户密码被改后 enabled=true 也 401。
+func TestAutoLoginHandler(t *testing.T) {
+	_, _, login := newAuthDeps(t) // 种默认 admin/admin123
+
+	// enabled=true:用默认账户登入,返 admin 会话
+	g := gin.New()
+	g.POST("/api/auth/auto-login", AutoLoginHandler(login, true))
+	w := authReq(t, g, "POST", "/api/auth/auto-login", nil, "")
+	wantCode(t, "auto-login enabled", w, 200)
+	if role := bodyData(t, w)["data"].(map[string]any)["role"]; role != "admin" {
+		t.Fatalf("auto-login role 应 admin, got %v", role)
+	}
+
+	// enabled=false:端点拒绝,不触发登录
+	g2 := gin.New()
+	g2.POST("/api/auth/auto-login", AutoLoginHandler(login, false))
+	wantCode(t, "auto-login disabled", authReq(t, g2, "POST", "/api/auth/auto-login", nil, ""), 401)
+}

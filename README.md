@@ -179,6 +179,17 @@ CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags="-s -w" -o task-schedu
 ./task-schedule -config config.yaml
 ```
 
+**裸二进制启停(可选)**:仓库根的 `start.sh` / `stop.sh` 提供基于 pid 文件的启停(支持同机多实例,
+各自维护 `task-schedule.pid`)。`start.sh` 按 CPU 架构选择 `task-schedule-linux-amd64` /
+`task-schedule-linux-arm64`,需先构建或下载对应架构二进制放仓库根(二进制本身不入库):
+
+```bash
+# amd64 示例(arm64 把 GOARCH 改成 arm64)。先打前端见上一节。
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false -trimpath -ldflags="-s -w" -o task-schedule-linux-amd64 .
+./start.sh   # 后台启动,日志见 stdio.log,pid 见 task-schedule.pid
+./stop.sh    # 优雅停止(SIGTERM,15s 超时再 SIGKILL)
+```
+
 **Docker**:`docker compose up -d`(compose 经 `config.release.yaml` 设 release + 登录限流;镜像内
 `//go:embed` 前端,健康检查打 `/health`,DB 不可达返回 503 供探针判定)。首启种 `admin/admin123`,
 **登录后立即在「账户设置」改密**。
@@ -211,3 +222,15 @@ cd web && npm run build      # 前端门槛:tsc + vite
 
 - 数据库无历史负担:drop 旧库重建即可(`app` / `job` / `job_instance` 三表由 AutoMigrate 创建)。
 - 调度器/reaper/retry 单测见 `internal/dispatch`;权限矩阵集成测试见 `internal/protocol/own`。
+
+## 声明
+
+- 本项目(task-schedule)为独立开发的任务调度服务,与 [PowerJob](https://github.com/PowerJob/PowerJob)
+  官方项目及其团队**无任何隶属、代言或关联**。
+- "PowerJob" 是其各自所有者的商标/项目名。本项目仅在 `/server/*` 与 `/openApi/*` 端点实现了与
+  PowerJob 通信协议的部分兼容,目的是让已对接 PowerJob 的自研 http worker / 业务客户端尽量零改动接入;
+  本项目**不包含 PowerJob 的任何源代码**,也不提供官方 Java processor 或任何语言 SDK。
+
+## 许可证
+
+[Apache License 2.0](./LICENSE)。贡献即视为按该协议授权。
