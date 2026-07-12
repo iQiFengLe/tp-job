@@ -21,21 +21,34 @@ export default function WorkersView(props: { appId?: number; onError: (error: un
   const [workers, setWorkers] = useState<WorkerView[]>([]);
   const [loading, setLoading] = useState(false);
 
-  const load = async () => {
+  const load = async (silent = false) => {
     if (!props.appId) return;
-    setLoading(true);
+    if (!silent) setLoading(true);
     try {
       const data = await api.workers.list(props.appId);
       setWorkers(data.list || []);
     } catch (error) {
       props.onError(error);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
+  // 自动刷新:5s 静默轮询(不闪 loading 表格抖动);标签页不可见时跳过,切回立即拉一次。
   useEffect(() => {
-    if (props.appId) void load();
+    if (!props.appId) return;
+    void load(true);
+    const id = setInterval(() => {
+      if (!document.hidden) void load(true);
+    }, 5000);
+    const onVis = () => {
+      if (!document.hidden) void load(true);
+    };
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onVis);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.appId]);
 
@@ -110,7 +123,7 @@ export default function WorkersView(props: { appId?: number; onError: (error: un
         title="在线节点"
         sub="CPU/内存/磁盘 进度条颜色随占用变化(绿 <70% / 橘 <90% / 红 ≥90%)"
         extra={
-          <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>
+          <Button icon={<ReloadOutlined />} onClick={() => load()} loading={loading}>
             刷新
           </Button>
         }
