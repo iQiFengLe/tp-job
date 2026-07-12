@@ -1,5 +1,9 @@
 # task-schedule
 
+> 单二进制、零外部依赖(Go + 默认 SQLite)的轻量级任务调度服务:把"到点触发一个 HTTP 接口"这件事做扎实——
+> 统一 worker 派发、9 态状态机、DB 驱动重试、失败转移、实例日志、Web 管理台。适合做中小团队后台定时任务 /
+> 业务编排的调度内核,也能对接已有的 PowerJob 自研 http worker;业务侧不嵌入 SDK、不绑 SaaS。
+
 基于 Go + Gin + GORM 的**轻量任务调度服务**,采用**统一 worker 派发模型**:worker 无 token 心跳上报
 (appName + systemMetrics + tags)→ 调度器按 tag 匹配 + score 择优选址 → 异步 POST 固定 body 到 worker
 → worker 回报状态推进终态 → reaper / RetryPump 兜底。默认 SQLite(纯 Go 驱动,无 CGO,静态二进制),
@@ -13,6 +17,17 @@
 - int 自增主键 + AppName 全局唯一;PowerJob 兼容(`/server/*` + runJob)与新模型统一收敛。
 
 > 设计全貌见 [`docs/refactor-unified-model.md`](docs/refactor-unified-model.md)。
+
+## 环境要求
+
+| 组件 | 版本 | 说明 |
+|---|---|---|
+| Go | 1.26+ | 后端构建/运行(见 `go.mod`) |
+| Node.js | 20+ | 仅构建前端管理台(产物 `//go:embed` 进二进制,运行时不需要) |
+| OS | Linux / macOS / Windows | 纯 Go SQLite,无 CGO,跨平台静态二进制 |
+| 数据库 | SQLite(默认,零配置) / MySQL 8+(可选) | SQLite 文件落盘即可;高负载切 `database.driver=mysql` |
+
+> 生产只需 **一个二进制 + 一份配置**;Node 仅在构建前端时出现,不进运行环境。
 
 ## 快速开始
 
