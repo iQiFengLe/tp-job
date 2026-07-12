@@ -1,6 +1,10 @@
+# 本文件位于 docker/ 目录。build context=仓库根(..),数据卷用 ../data ../logs 落仓库根,与原根目录布局一致。
+# 运行:在此目录 `docker compose up -d`,或仓库根 `docker compose -f docker/docker-compose.yml up -d`。
 services:
   tp-job:
-    build: .
+    build:
+      context: ..               # 构建上下文=仓库根(Dockerfile 需 COPY config/web/go.mod 等)
+      dockerfile: docker/Dockerfile
     image: tp-job:latest
     container_name: tp-job
     restart: unless-stopped
@@ -17,8 +21,8 @@ services:
     # 管理员账户:首次启动 seed admin/admin123,登录后立即 Web 改密。
     command: ["-config", "config.release.yaml"]
     volumes:
-      - ./data:/app/data   # sqlite 数据持久化(切 mysql 后可移除)
-      - ./logs:/app/logs   # 日志 + 实例日志持久化
+      - ../data:/app/data   # sqlite 数据持久化(切 mysql 后可移除)
+      - ../logs:/app/logs   # 日志 + 实例日志持久化
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/health"]
       interval: 15s
@@ -35,4 +39,4 @@ services:
   #     MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD}
   #     MYSQL_DATABASE: tp_job
   #   volumes:
-  #     - ./mysql-data:/var/lib/mysql
+  #     - ../mysql-data:/var/lib/mysql

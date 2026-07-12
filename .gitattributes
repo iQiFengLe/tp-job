@@ -5,6 +5,7 @@
 # Dockerfile / compose 同样交给 Linux 容器,统一 LF 更稳。
 Dockerfile        text eol=lf
 *.dockerfile      text eol=lf
+*.dockerignore    text eol=lf
 docker-compose*.yml text eol=lf
 *.yaml            text eol=lf
 *.yml             text eol=lf

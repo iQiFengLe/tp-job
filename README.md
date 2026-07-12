@@ -55,7 +55,6 @@ tp-job/
 ├── config.yaml                # 配置
 ├── examples/http-worker/      # 最小 http worker 示例(/worker/* 协议)
 ├── web/                       # 前端管理台(React + antd),dist 嵌入二进制
-├── deploy/nginx-isolation.conf.example  # /server/* /worker/* 网络隔离示例
 └── internal/
     ├── domain/                # App/Job/Instance + 8 态状态机 + Executor/DispatchBody/SystemMetrics
     ├── repository/            # GORM 仓储(App/Job/Instance + OpenDatabase + 终态守护)
@@ -164,7 +163,7 @@ payload 为事件瞬间快照。投递语义为**至少一次**(at-least-once):
 `acceptNotTagJob || tag ∈ worker.tags || (tag 空 ∧ worker.tags 空)`;按 `systemMetrics.score` 降序取首。
 
 > ⚠ `/server/*`、`/worker/*` 无鉴权:任何人可注册任意 worker 地址 → 到期 job 主动 POST 该地址(SSRF),
-> 可伪造实例状态。**生产必须通过网络隔离保护**(见 `deploy/nginx-isolation.conf.example`),切勿直接暴露公网。
+> 可伪造实例状态。**生产必须通过网络隔离保护**(如 nginx IP 白名单或内网部署),切勿直接暴露公网。
 
 示例 worker:`examples/http-worker/` 演示 `/worker/*` 最小接入(心跳 + `/run` 回显 + 异步回报 success)。
 
@@ -205,11 +204,12 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false -trimpath -ldflag
 ./stop.sh    # 优雅停止(SIGTERM,15s 超时再 SIGKILL)
 ```
 
-**Docker**:`docker compose up -d`(compose 经 `config.release.yaml` 设 release + 登录限流;镜像内
+**Docker**:在 `docker/` 目录下 `docker compose up -d`(或仓库根 `docker compose -f docker/docker-compose.yml up -d`)。
+compose 经 `config.release.yaml` 设 release + 登录限流;镜像内
 `//go:embed` 前端,健康检查打 `/health`,DB 不可达返回 503 供探针判定)。首启种 `admin/admin123`,
 **登录后立即在「账户设置」改密**。
 
-**网络隔离(生产必做)**:用 `deploy/nginx-isolation.conf.example` 前置反代,仅放行可信 worker 网段访问
+**网络隔离(生产必做)**:用 nginx 前置反代 + IP 白名单(`geo`/`allow`-`deny` 块),仅放行可信 worker 网段访问
 `/server/*`、`/worker/*`;`/api/*` 自带登录鉴权可正常暴露。
 
 ## 主要 API

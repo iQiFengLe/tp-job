@@ -5,7 +5,7 @@
 // Workflow/WorkflowInstance 区(13 个)因 tp-job 无工作流模型,未实现。不支持官方 Java SDK。
 //
 // 鉴权对齐 PowerJob OpenAPI 默认信任 + 本项目"靠网络隔离"约定(业务客户端普遍不带 token 直连);
-// 生产隔离由部署侧保证(见 deploy/nginx-isolation.conf.example,勿暴露公网)。
+// 生产隔离由部署侧保证(网络层白名单/限流,勿暴露公网)。
 package powerjob
 
 import (

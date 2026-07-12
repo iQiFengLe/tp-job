@@ -15,8 +15,7 @@ logs
 *.db-shm
 server.out
 *.local.yaml
-Dockerfile
-.dockerignore
-docker-compose.yml
+# Dockerfile / compose / 本 ignore 自身都在此目录,整目录忽略,无需进镜像
+docker
 deploy
 README.md
