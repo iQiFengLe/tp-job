@@ -7,6 +7,8 @@ package workerreg
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -41,6 +43,9 @@ type Registry struct {
 }
 
 func New(timeout time.Duration, log *slog.Logger) *Registry {
+	if log == nil {
+		log = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
 	return &Registry{workers: make(map[int64]map[string]*WorkerInfo), timeout: timeout, log: log}
 }
 
@@ -112,8 +117,9 @@ func (r *Registry) Pick(appID int64, jobTag string) string {
 func (r *Registry) PickFull(appID int64, jobTag string) (WorkerInfo, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	online := r.onlineLocked(appID)
 	var best *WorkerInfo
-	for _, w := range r.onlineLocked(appID) {
+	for _, w := range online {
 		if !matchTag(jobTag, w) {
 			continue
 		}
@@ -122,6 +128,18 @@ func (r *Registry) PickFull(appID int64, jobTag string) (WorkerInfo, bool) {
 		}
 	}
 	if best == nil {
+		// 诊断:区分"该 app 无在线 worker"与"在线但 tag 全不匹配"。
+		// 否则上层只报笼统"无可用 worker(tag 不匹配或全部离线)",无从定位是 worker 未注册/心跳超时,
+		// 还是 tag 实际不符。双空匹配逻辑见 matchTag(有 TestPickBothEmpty 覆盖,正确)。
+		if len(online) == 0 {
+			r.log.Warn("派发选址失败:该 app 无在线 worker", "appID", appID, "jobTag", jobTag)
+		} else {
+			diag := make([]string, 0, len(online))
+			for _, w := range online {
+				diag = append(diag, fmt.Sprintf("%s tags=%v acceptAny=%v", w.WorkerAddress, w.Tags, w.AcceptNotTagJob))
+			}
+			r.log.Warn("派发选址失败:在线 worker tag 均不匹配", "appID", appID, "jobTag", jobTag, "workers", diag)
+		}
 		return WorkerInfo{}, false
 	}
 	return *best, true
