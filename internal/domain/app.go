@@ -1,7 +1,7 @@
 // Package domain 定义任务调度服务的统一领域模型。
 //
-// 这是重构后的核心模型(见 docs/refactor-unified-model.md):App / Job / Instance
-// 三张表 + 8 态状态机 + Executor/DispatchBody/SystemMetrics 等抽象。与旧 internal/model
+// 这是核心领域模型(见 docs/design.md):App / Job / Instance
+// 三张表 + 9 态状态机 + Executor/DispatchBody/SystemMetrics 等抽象。与旧 internal/model
 // 包并存,旧代码在重构过渡期继续使用旧 model;本包供新调度器/协议层逐步采用。
 package domain
 

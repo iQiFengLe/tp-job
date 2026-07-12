@@ -2,7 +2,7 @@ import dayjs from 'dayjs';
 
 export const PAGE_SIZE = 20;
 
-// 9 态状态机颜色(见 docs/refactor-unified-model.md §5)
+// 9 态状态机颜色(见 docs/design.md §4)
 export const statusColor: Record<string, string> = {
   queued: 'default',
   waiting_receive: 'processing',

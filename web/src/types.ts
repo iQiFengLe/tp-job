@@ -159,7 +159,7 @@ export type JobUpdateValues = Partial<JobCreateValues>;
 
 // ===== Instance =====
 
-// 9 态状态机(见 docs/refactor-unified-model.md §5)
+// 9 态状态机(见 docs/design.md §4)
 export type InstanceStatus =
   | 'queued'
   | 'waiting_receive'

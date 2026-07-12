@@ -48,7 +48,7 @@ type routeDef struct {
 	admin   bool
 }
 
-// ownRoutes 全部资源路由 + 各自鉴权级别(矩阵见 docs/refactor-unified-model.md §9)。
+// ownRoutes 全部资源路由 + 各自鉴权级别(矩阵见 docs/design.md §10)。
 // 集中定义避免"加路由要改两处"。app 管理(新增/列出/删除)仅 admin;查看/修改 app 与
 // app 名下资源均为 admin 任意 / app 仅自家。
 func ownRoutes(d Deps) []routeDef {

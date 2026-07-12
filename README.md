@@ -16,7 +16,7 @@
 - **管理端账户登录**(管理员 admin_user 表 + 应用账户走 app 表)+ 权限矩阵(admin/app 双角色)。
 - int 自增主键 + AppName 全局唯一;PowerJob 兼容(`/server/*` + runJob)与新模型统一收敛。
 
-> 设计全貌见 [`docs/refactor-unified-model.md`](docs/refactor-unified-model.md)。
+> 设计全貌见 [`docs/design.md`](docs/design.md)。
 
 ## 环境要求
 
