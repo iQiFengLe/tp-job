@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"dida/internal/config"
-	"dida/internal/domain"
+	"tp-job/internal/config"
+	"tp-job/internal/domain"
 )
 
 func TestBuildCallbackFields(t *testing.T) {

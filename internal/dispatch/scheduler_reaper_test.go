@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"dida/internal/domain"
-	"dida/internal/instancelog"
-	"dida/internal/workerreg"
+	"tp-job/internal/domain"
+	"tp-job/internal/instancelog"
+	"tp-job/internal/workerreg"
 )
 
 func testLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }

@@ -226,9 +226,9 @@ POST /server/workerHeartbeat    (PowerJob 协议,字段对齐 PowerJob)
 
 ```
 jobInstanceTag = Instance.Tag != "" ? Instance.Tag : Job.Tag
-candidates = [ w ∈ online(appName) | matchTag(jobInstanceTag, w) ]
+cantp-jobtes = [ w ∈ online(appName) | matchTag(jobInstanceTag, w) ]
 matchTag(t, w) = w.acceptNotTagJob || t ∈ w.tags || (t == "" && len(w.tags) == 0)
-pick = candidates 按 systemMetrics.score 降序 取首   // 无候选 → 实例 failed(或排队重试)
+pick = cantp-jobtes 按 systemMetrics.score 降序 取首   // 无候选 → 实例 failed(或排队重试)
 ```
 
 ### 7.3 派发(按 worker.protocol)
@@ -264,7 +264,7 @@ POST /server/reportLog               {instanceLogContents:[...]}
 ## 9. 管理端鉴权(账户 / 登录会话)
 
 - **管理员账户**:admin_user 表(首次启动 seed admin/admin123,Web 可改用户名/密码;**已迁出 config/env**,
-  `DIDA_ADMIN_PASSWORD` 等环境变量不再生效)。release 模式由 `config.release.yaml` 控制(不再经 env 覆盖 mode)。
+  `TP_JOB_ADMIN_PASSWORD` 等环境变量不再生效)。release 模式由 `config.release.yaml` 控制(不再经 env 覆盖 mode)。
 - **应用账户**:`app` 表(AppName + Password)。
 - `POST /api/auth/login {ident, password}` → session token;先匹配 admins(管理员)否则匹配 `app.AppName`(应用)。
 - 后续 `Authorization: Bearer <token>`;`SessionAuth()` 解析 `{role, appID?}`。

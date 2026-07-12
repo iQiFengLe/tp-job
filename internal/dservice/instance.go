@@ -7,10 +7,10 @@ import (
 
 	"gorm.io/gorm"
 
-	"dida/internal/dispatch"
-	"dida/internal/domain"
-	"dida/internal/instancelog"
-	"dida/internal/repository"
+	"tp-job/internal/dispatch"
+	"tp-job/internal/domain"
+	"tp-job/internal/instancelog"
+	"tp-job/internal/repository"
 )
 
 var ErrInstanceNotFound = errors.New("实例不存在")
@@ -129,7 +129,7 @@ func (s *InstanceService) SetStatus(id int64, status, result string) error {
 
 // Stop 标记实例 stopped 并释放其并发槽(供 OpenAPI stopInstance)。
 //
-// fire-and-forget 限制:dida 无 worker 控制通道,此操作仅改服务端状态 + 腾出并发位,
+// fire-and-forget 限制:tp-job 无 worker 控制通道,此操作仅改服务端状态 + 腾出并发位,
 // 不真正中断 worker 上已在跑的执行——worker 会继续跑完,其迟到回报被"终态守护"拒绝(实例保持 stopped),
 // 但 ReportStatus 仍会再次 ReleaseInFlight(幂等)。故 Stop 一个在飞实例后,直到该 worker 执行结束前,
 // 同 job 实际并发可能临时超过 MaxConcurrency(槽已腾、旧执行未止);业务需自行幂等。

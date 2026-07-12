@@ -9,10 +9,10 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
-	"dida/internal/dispatch"
-	"dida/internal/domain"
-	"dida/internal/repository"
-	"dida/internal/schedtime"
+	"tp-job/internal/dispatch"
+	"tp-job/internal/domain"
+	"tp-job/internal/repository"
+	"tp-job/internal/schedtime"
 )
 
 // JobService job 业务。

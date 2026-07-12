@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# 启动 dida
-# - 用 pid 文件定位进程(支持同机多实例:每个实例独立目录,各自维护 dida.pid)
-# - 自动检测 CPU 架构,选对应二进制:dida-linux-amd64 / dida-linux-arm64
+# 启动 tp-job
+# - 用 pid 文件定位进程(支持同机多实例:每个实例独立目录,各自维护 tp-job.pid)
+# - 自动检测 CPU 架构,选对应二进制:tp-job-linux-amd64 / tp-job-linux-arm64
 # 用法: ./start.sh
 
 set -euo pipefail
 cd "$(dirname "$0")"
 
-PIDFILE=dida.pid
+PIDFILE=tp-job.pid
 LOG=stdio.log
 
 # 1) 用 pid 文件查重:已在运行则不重复拉起
@@ -24,8 +24,8 @@ fi
 # 2) 检测架构,选择二进制
 ARCH=$(uname -m)
 case "$ARCH" in
-  x86_64|amd64)  BIN=dida-linux-amd64 ;;
-  aarch64|arm64) BIN=dida-linux-arm64 ;;
+  x86_64|amd64)  BIN=tp-job-linux-amd64 ;;
+  aarch64|arm64) BIN=tp-job-linux-arm64 ;;
   *) echo "错误: 不支持的架构 $ARCH" >&2; exit 1 ;;
 esac
 

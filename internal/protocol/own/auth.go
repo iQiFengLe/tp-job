@@ -7,8 +7,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"dida/internal/auth"
-	"dida/internal/dservice"
+	"tp-job/internal/auth"
+	"tp-job/internal/dservice"
 )
 
 // ===== 鉴权 DTO / 端点 =====

@@ -5,7 +5,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"dida/internal/domain"
+	"tp-job/internal/domain"
 )
 
 type JobStore struct{ db *gorm.DB }

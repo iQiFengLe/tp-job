@@ -1,8 +1,8 @@
 // OpenAPI 兼容层(/openApi/*):对齐原版 PowerJob server 的 OpenAPIController,
-// 让原对接 PowerJob 的业务客户端(自研 HTTP 调用)零改动接入 dida。
+// 让原对接 PowerJob 的业务客户端(自研 HTTP 调用)零改动接入 tp-job。
 //
 // 覆盖 PowerJob OpenAPI 的 App/Job/Instance 区共 18 个端点(路径/DTO 对齐 powerjob-common)。
-// Workflow/WorkflowInstance 区(13 个)因 dida 无工作流模型,未实现。不支持官方 Java SDK。
+// Workflow/WorkflowInstance 区(13 个)因 tp-job 无工作流模型,未实现。不支持官方 Java SDK。
 //
 // 鉴权对齐 PowerJob OpenAPI 默认信任 + 本项目"靠网络隔离"约定(业务客户端普遍不带 token 直连);
 // 生产隔离由部署侧保证(见 deploy/nginx-isolation.conf.example,勿暴露公网)。
@@ -19,9 +19,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"dida/internal/domain"
-	"dida/internal/dservice"
-	"dida/internal/repository"
+	"tp-job/internal/domain"
+	"tp-job/internal/dservice"
+	"tp-job/internal/repository"
 )
 
 // OpenApiDeps OpenAPI 依赖。Store 供 fetchAllJob/queryJob/queryInstance 等灵活查询。
@@ -72,7 +72,7 @@ func PowerResultFail(msg string) PowerResultDTO {
 
 // ===== PowerJob DTO(字段名/类型对齐 powerjob-common response) =====
 
-// JobInfoDTO 对齐 tech.powerjob.common.response.JobInfoDTO。dida 无的概念(processor/logConfig 等)省略或零值。
+// JobInfoDTO 对齐 tech.powerjob.common.response.JobInfoDTO。tp-job 无的概念(processor/logConfig 等)省略或零值。
 type JobInfoDTO struct {
 	ID                 int64  `json:"id"`
 	JobName            string `json:"jobName"`
@@ -81,7 +81,7 @@ type JobInfoDTO struct {
 	JobParams          string `json:"jobParams,omitempty"`
 	TimeExpressionType int    `json:"timeExpressionType,omitempty"` // 1 API/2 CRON/3 FIX_RATE/4 FIX_DELAY
 	TimeExpression     string `json:"timeExpression,omitempty"`
-	ExecuteType        int    `json:"executeType,omitempty"`   // dida 固定 http→1 STANDALONE
+	ExecuteType        int    `json:"executeType,omitempty"`   // tp-job 固定 http→1 STANDALONE
 	ProcessorType      int    `json:"processorType,omitempty"` // 占位 1(JAVA)
 	ProcessorInfo      string `json:"processorInfo,omitempty"`
 	MaxInstanceNum     int    `json:"maxInstanceNum,omitempty"`
@@ -163,7 +163,7 @@ func timeExprCode(p *TimeExprType) int {
 	return int(*p)
 }
 
-// SaveJobReq 对齐 SaveJobInfoRequest(指针字段区分未提供/零值)。dida 仅消费能存储的子集。
+// SaveJobReq 对齐 SaveJobInfoRequest(指针字段区分未提供/零值)。tp-job 仅消费能存储的子集。
 type SaveJobReq struct {
 	ID                 *int64        `json:"id,omitempty"`
 	JobName            *string       `json:"jobName,omitempty"`
@@ -777,7 +777,7 @@ func (d OpenApiDeps) queryInstance(c *gin.Context) {
 		c.JSON(http.StatusOK, ResultOK(PageResult{Index: q.Index, PageSize: q.PageSize, TotalItems: 1, TotalPages: 1, Data: []InstanceInfoDTO{instanceToDTO(ins, jobParams)}}))
 		return
 	}
-	// 分页:PowerJob index 0-based → dida page 1-based
+	// 分页:PowerJob index 0-based → tp-job page 1-based
 	f := repository.InstanceFilter{Page: q.Index + 1, Size: q.PageSize}
 	if q.JobIDEq != nil {
 		f.JobID = *q.JobIDEq

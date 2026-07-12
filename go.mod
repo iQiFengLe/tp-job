@@ -1,4 +1,4 @@
-module dida
+module tp-job
 
 go 1.26.1
 

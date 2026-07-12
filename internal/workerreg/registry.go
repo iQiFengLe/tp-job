@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"dida/internal/domain"
+	"tp-job/internal/domain"
 )
 
 // Protocol worker 接入协议。

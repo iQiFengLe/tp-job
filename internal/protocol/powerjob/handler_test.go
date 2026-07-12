@@ -18,13 +18,13 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 
-	"dida/internal/dispatch"
-	"dida/internal/domain"
-	"dida/internal/dservice"
-	"dida/internal/instancelog"
-	"dida/internal/repository"
-	"dida/internal/wire"
-	"dida/internal/workerreg"
+	"tp-job/internal/dispatch"
+	"tp-job/internal/domain"
+	"tp-job/internal/dservice"
+	"tp-job/internal/instancelog"
+	"tp-job/internal/repository"
+	"tp-job/internal/wire"
+	"tp-job/internal/workerreg"
 )
 
 func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }

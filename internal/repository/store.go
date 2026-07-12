@@ -9,7 +9,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"dida/internal/domain"
+	"tp-job/internal/domain"
 )
 
 // Store domain 仓储聚合。

@@ -3,7 +3,7 @@ package own
 import (
 	"testing"
 
-	"dida/internal/protocol/powerjob"
+	"tp-job/internal/protocol/powerjob"
 )
 
 // TestImportJobsCreateUpsert 覆盖:dry_run 不落库、首次新增、重复 upsert 更新、Quartz cron 算 next_run、来源标记。

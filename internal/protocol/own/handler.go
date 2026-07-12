@@ -13,11 +13,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"dida/internal/auth"
-	"dida/internal/dservice"
-	"dida/internal/protocol/powerjob"
-	"dida/internal/repository"
-	"dida/internal/workerreg"
+	"tp-job/internal/auth"
+	"tp-job/internal/dservice"
+	"tp-job/internal/protocol/powerjob"
+	"tp-job/internal/repository"
+	"tp-job/internal/workerreg"
 )
 
 // Deps own 协议依赖。

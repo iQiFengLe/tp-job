@@ -19,17 +19,17 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"dida/internal/auth"
-	"dida/internal/config"
-	"dida/internal/dispatch"
-	"dida/internal/dservice"
-	"dida/internal/instancelog"
-	"dida/internal/logger"
-	"dida/internal/protocol/own"
-	"dida/internal/protocol/powerjob"
-	"dida/internal/protocol/worker"
-	"dida/internal/repository"
-	"dida/internal/workerreg"
+	"tp-job/internal/auth"
+	"tp-job/internal/config"
+	"tp-job/internal/dispatch"
+	"tp-job/internal/dservice"
+	"tp-job/internal/instancelog"
+	"tp-job/internal/logger"
+	"tp-job/internal/protocol/own"
+	"tp-job/internal/protocol/powerjob"
+	"tp-job/internal/protocol/worker"
+	"tp-job/internal/repository"
+	"tp-job/internal/workerreg"
 )
 
 // embeddedWeb 内置前端管理台产物(web/dist)。编译期必须存在该目录(先 npm run build)。

@@ -9,7 +9,7 @@ import (
 
 	"gopkg.in/natefinch/lumberjack.v2"
 
-	"dida/internal/config"
+	"tp-job/internal/config"
 )
 
 var defaultLogger *slog.Logger
@@ -36,7 +36,7 @@ func Init(cfg config.Log) (*slog.Logger, error) {
 		Level:     level,
 		AddSource: false,
 	})
-	defaultLogger = slog.New(handler).With("service", "dida")
+	defaultLogger = slog.New(handler).With("service", "tp-job")
 	slog.SetDefault(defaultLogger)
 	return defaultLogger, nil
 }

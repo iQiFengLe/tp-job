@@ -4,8 +4,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 
-	"dida/internal/domain"
-	"dida/internal/wire"
+	"tp-job/internal/domain"
+	"tp-job/internal/wire"
 )
 
 // AskResponse Actor ask 的统一响应(对齐 PowerJob):data 为 base64(业务对象 JSON)。

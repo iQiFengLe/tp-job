@@ -5,8 +5,8 @@
 # reportInstanceStatus / 回报 status 可伪造实例状态。生产部署必须让这两组端点仅对 worker 来源网段
 # 开放，切勿暴露公网。/api/* 自带登录会话鉴权，可正常暴露。
 #
-# 用法：geo 块放入 nginx.conf 的 http{}；server 块为本片段。置于 dida 前端，
-# 监听 80/443，proxy_pass 到上游 dida:8080。
+# 用法：geo 块放入 nginx.conf 的 http{}；server 块为本片段。置于 tp-job 前端，
+# 监听 80/443，proxy_pass 到上游 tp-job:8080。
 
 # ---- 放入 http{} ----
 # 按实际 worker 部署网段修改 allow 规则
@@ -27,14 +27,14 @@ server {
         if ($worker_allowed = 0) {
             return 403;
         }
-        proxy_pass http://dida:8080;
+        proxy_pass http://tp-job:8080;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
     }
 
     # 管理 API(自带登录会话鉴权)+ 管理台静态资源
     location / {
-        proxy_pass http://dida:8080;
+        proxy_pass http://tp-job:8080;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;

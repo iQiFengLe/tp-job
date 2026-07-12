@@ -8,8 +8,8 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 
-	"dida/internal/domain"
-	"dida/internal/repository"
+	"tp-job/internal/domain"
+	"tp-job/internal/repository"
 )
 
 // 管理员账户相关 sentinel。handler 层(badStatus/notFoundStatus)按这些映射 HTTP 码。

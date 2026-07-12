@@ -6,7 +6,7 @@
 // 靠 /server/* /openApi/* 网络隔离)。
 package powerjob
 
-import "dida/internal/domain"
+import "tp-job/internal/domain"
 
 // PowerJob 官方 InstanceStatus 数字码(1/2/3/4/5/9/10 与 tech.powerjob.common.enums.InstanceStatus 一致;
 // 6=skipped、7=timeout 为本服务自定义扩展码,仅服务端写,worker 永不上报)。

@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"dida/internal/domain"
+	"tp-job/internal/domain"
 )
 
 // TestInstanceDurationOnTerminal 验证终态写入时计算 duration_ms = end - start_time。

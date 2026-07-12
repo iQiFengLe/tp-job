@@ -18,7 +18,7 @@ export interface ThemeEntry {
   config: ConfigProviderProps;
 }
 
-const STORAGE_KEY = 'dida-theme';
+const STORAGE_KEY = 'tp-job-theme';
 
 interface ThemeContextValue {
   themeKey: string;       // 用户选择:'auto'(跟随系统) 或具体主题 key(用户手选后固定)

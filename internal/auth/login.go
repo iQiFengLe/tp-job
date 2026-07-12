@@ -5,7 +5,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"dida/internal/domain"
+	"tp-job/internal/domain"
 )
 
 // ErrLoginFailed 登录失败(用户名/密码不匹配,或应用已禁用)。统一错误避免身份枚举。

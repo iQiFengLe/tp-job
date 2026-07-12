@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# 停止 dida:只按 pid 文件里的 PID 精确停这一个进程
-# (同机多实例时,每个实例独立目录、各自的 dida.pid,互不影响)
+# 停止 tp-job:只按 pid 文件里的 PID 精确停这一个进程
+# (同机多实例时,每个实例独立目录、各自的 tp-job.pid,互不影响)
 # 先优雅 SIGTERM,超时再 SIGKILL
 # 用法: ./stop.sh
 
 cd "$(dirname "$0")"
 
-PIDFILE=dida.pid
+PIDFILE=tp-job.pid
 WAIT=15  # 优雅等待秒数
 
 if [ ! -f "$PIDFILE" ]; then

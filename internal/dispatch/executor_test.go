@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"dida/internal/domain"
-	"dida/internal/workerreg"
+	"tp-job/internal/domain"
+	"tp-job/internal/workerreg"
 )
 
 func TestDispatchHTTPAccepted(t *testing.T) {

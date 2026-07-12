@@ -3,7 +3,7 @@ package repository
 import (
 	"gorm.io/gorm"
 
-	"dida/internal/domain"
+	"tp-job/internal/domain"
 )
 
 // AdminUserStore 管理员账户仓储。与 AppStore 同构:薄封装 gorm,业务规则在 dservice。

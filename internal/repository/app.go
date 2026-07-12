@@ -3,7 +3,7 @@ package repository
 import (
 	"gorm.io/gorm"
 
-	"dida/internal/domain"
+	"tp-job/internal/domain"
 )
 
 type AppStore struct{ db *gorm.DB }

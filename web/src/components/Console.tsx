@@ -14,7 +14,7 @@ import WorkersView from './WorkersView';
 
 const { Header, Sider, Content } = Layout;
 
-const SELECTED_APP_KEY = 'dida.selectedAppId';
+const SELECTED_APP_KEY = 'tp-job.selectedAppId';
 function storedAppId(): number | undefined {
   const v = localStorage.getItem(SELECTED_APP_KEY);
   if (!v) return undefined;

@@ -8,16 +8,16 @@ import (
 	"strings"
 	"time"
 
-	"dida/internal/domain"
-	"dida/internal/protocol/powerjob"
-	"dida/internal/schedtime"
+	"tp-job/internal/domain"
+	"tp-job/internal/protocol/powerjob"
+	"tp-job/internal/schedtime"
 )
 
-// 本文件实现 PowerJob → dida 的任务同步落库逻辑(handler 在 handler.go)。
+// 本文件实现 PowerJob → tp-job 的任务同步落库逻辑(handler 在 handler.go)。
 // 转换 + 落库放在 own 包而非 dservice:powerjob 包(server 兼容层)已依赖 dservice,
 // 反向依赖会循环 import;own 依赖 powerjob 不构成循环。
 
-// pjScheduleKind PowerJob TimeExpressionType → dida ScheduleKind。
+// pjScheduleKind PowerJob TimeExpressionType → tp-job ScheduleKind。
 // 1=API 2=CRON 3=FIX_RATE 4=FIX_DELAY;其余/未知 → api(不自动调度,避免误触发)。
 func pjScheduleKind(t int) string {
 	switch t {

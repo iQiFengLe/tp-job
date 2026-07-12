@@ -141,13 +141,13 @@ func Load(path string) (*Config, error) {
 // server.mode 不支持 env 覆盖:env 把 release 降级 debug 会绕过登录限流强制(Validate 据 Mode
 // 判定 release),故 mode 仅由 config.yaml 决定。部署需 release 时改 yaml 或用 config.release.yaml。
 func (c *Config) applyEnv() {
-	if v := os.Getenv("DIDA_DB_DRIVER"); v != "" {
+	if v := os.Getenv("TP_JOB_DB_DRIVER"); v != "" {
 		c.Database.Driver = v
 	}
-	if v := os.Getenv("DIDA_MYSQL_DSN"); v != "" {
+	if v := os.Getenv("TP_JOB_MYSQL_DSN"); v != "" {
 		c.Database.MySQL.DSN = v
 	}
-	if v := os.Getenv("DIDA_POWERJOB_SERVER_ADDRESS"); v != "" {
+	if v := os.Getenv("TP_JOB_POWERJOB_SERVER_ADDRESS"); v != "" {
 		c.PowerJob.ServerAddress = v
 	}
 }
@@ -167,7 +167,7 @@ func (c *Config) applyDefaults() {
 		c.Database.Driver = "sqlite"
 	}
 	if c.Database.SQLite.Path == "" {
-		c.Database.SQLite.Path = "./data/dida.db"
+		c.Database.SQLite.Path = "./data/tp-job.db"
 	}
 	if c.Database.SQLite.MaxOpenConns == 0 {
 		c.Database.SQLite.MaxOpenConns = 8
@@ -185,7 +185,7 @@ func (c *Config) applyDefaults() {
 		c.Log.Dir = "./logs"
 	}
 	if c.Log.FileName == "" {
-		c.Log.FileName = "dida.log"
+		c.Log.FileName = "tp-job.log"
 	}
 	if c.Log.MaxSizeMB == 0 {
 		c.Log.MaxSizeMB = 100

@@ -1,4 +1,4 @@
-const TOKEN_KEY = 'dida-token';
+const TOKEN_KEY = 'tp-job-token';
 
 export function loadToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);

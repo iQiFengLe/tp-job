@@ -8,7 +8,7 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 
-	"dida/internal/domain"
+	"tp-job/internal/domain"
 )
 
 func newTestStore(t *testing.T) *Store {
