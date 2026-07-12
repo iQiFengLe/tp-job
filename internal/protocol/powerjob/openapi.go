@@ -11,6 +11,7 @@ package powerjob
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -80,19 +81,19 @@ type JobInfoDTO struct {
 	JobParams          string `json:"jobParams,omitempty"`
 	TimeExpressionType int    `json:"timeExpressionType,omitempty"` // 1 API/2 CRON/3 FIX_RATE/4 FIX_DELAY
 	TimeExpression     string `json:"timeExpression,omitempty"`
-	ExecuteType        int    `json:"executeType,omitempty"`  // task-schedule 固定 http→1 STANDALONE
+	ExecuteType        int    `json:"executeType,omitempty"`   // task-schedule 固定 http→1 STANDALONE
 	ProcessorType      int    `json:"processorType,omitempty"` // 占位 1(JAVA)
 	ProcessorInfo      string `json:"processorInfo,omitempty"`
 	MaxInstanceNum     int    `json:"maxInstanceNum,omitempty"`
 	Concurrency        int    `json:"concurrency,omitempty"`
 	InstanceTimeLimit  int64  `json:"instanceTimeLimit,omitempty"` // ms
 	InstanceRetryNum   int    `json:"instanceRetryNum,omitempty"`
-	Status             int    `json:"status,omitempty"` // 1 正常 / 2 停止
+	Status             int    `json:"status,omitempty"`          // 1 正常 / 2 停止
 	NextTriggerTime    int64  `json:"nextTriggerTime,omitempty"` // ms
 	StartTime          int64  `json:"startTime,omitempty"`       // ms 生效起始
 	EndTime            int64  `json:"endTime,omitempty"`         // ms 生效截止
 	Tag                string `json:"tag,omitempty"`
-	GmtCreate          int64  `json:"gmtCreate,omitempty"`  // ms
+	GmtCreate          int64  `json:"gmtCreate,omitempty"`   // ms
 	GmtModified        int64  `json:"gmtModified,omitempty"` // ms
 }
 
@@ -114,22 +115,70 @@ type InstanceInfoDTO struct {
 	GmtModified         int64  `json:"gmtModified,omitempty"`
 }
 
+// TimeExprType 兼容 PowerJob timeExpressionType:原版客户端按枚举名发字符串("CRON"/"FIXED_DELAY"),
+// 也有按数字 code 发的;两者皆收,内部统一存数字 code。
+// 1 API / 2 CRON / 3 FIXED_RATE / 4 FIXED_DELAY / 5 WORKFLOW(对齐 tech.powerjob.common.enums.TimeExpressionType)。
+type TimeExprType int
+
+func (t *TimeExprType) UnmarshalJSON(data []byte) error {
+	s := strings.TrimSpace(string(data))
+	if s == "" || s == "null" {
+		return nil
+	}
+	if s[0] == '"' { // 字符串:原版枚举名(大小写不敏感)
+		var name string
+		if err := json.Unmarshal([]byte(s), &name); err != nil {
+			return err
+		}
+		switch strings.ToUpper(strings.TrimSpace(name)) {
+		case "API":
+			*t = 1
+		case "CRON":
+			*t = 2
+		case "FIXED_RATE":
+			*t = 3
+		case "FIXED_DELAY":
+			*t = 4
+		case "WORKFLOW":
+			*t = 5
+		default:
+			return fmt.Errorf("timeExpressionType 枚举名非法: %q", name)
+		}
+		return nil
+	}
+	// 数字 code
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return fmt.Errorf("timeExpressionType 非法: %s", s)
+	}
+	*t = TimeExprType(n)
+	return nil
+}
+
+// timeExprCode nil 安全取 code;未提供 → 0(API)。
+func timeExprCode(p *TimeExprType) int {
+	if p == nil {
+		return 0
+	}
+	return int(*p)
+}
+
 // SaveJobReq 对齐 SaveJobInfoRequest(指针字段区分未提供/零值)。task-schedule 仅消费能存储的子集。
 type SaveJobReq struct {
-	ID                 *int64  `json:"id,omitempty"`
-	JobName            *string `json:"jobName,omitempty"`
-	JobDescription     *string `json:"jobDescription,omitempty"`
-	AppID              *int64  `json:"appId,omitempty"`
-	JobParams          *string `json:"jobParams,omitempty"`
-	TimeExpressionType *int    `json:"timeExpressionType,omitempty"`
-	TimeExpression     *string `json:"timeExpression,omitempty"`
-	StartTime          *int64  `json:"startTime,omitempty"` // ms 生效起始
-	EndTime            *int64  `json:"endTime,omitempty"`   // ms 生效截止
-	Concurrency        *int    `json:"concurrency,omitempty"`
-	InstanceTimeLimit  *int64  `json:"instanceTimeLimit,omitempty"`
-	InstanceRetryNum   *int    `json:"instanceRetryNum,omitempty"`
-	Enable             *bool   `json:"enable,omitempty"`
-	Tag                *string `json:"tag,omitempty"`
+	ID                 *int64        `json:"id,omitempty"`
+	JobName            *string       `json:"jobName,omitempty"`
+	JobDescription     *string       `json:"jobDescription,omitempty"`
+	AppID              *int64        `json:"appId,omitempty"`
+	JobParams          *string       `json:"jobParams,omitempty"`
+	TimeExpressionType *TimeExprType `json:"timeExpressionType,omitempty"`
+	TimeExpression     *string       `json:"timeExpression,omitempty"`
+	StartTime          *int64        `json:"startTime,omitempty"` // ms 生效起始
+	EndTime            *int64        `json:"endTime,omitempty"`   // ms 生效截止
+	Concurrency        *int          `json:"concurrency,omitempty"`
+	InstanceTimeLimit  *int64        `json:"instanceTimeLimit,omitempty"`
+	InstanceRetryNum   *int          `json:"instanceRetryNum,omitempty"`
+	Enable             *bool         `json:"enable,omitempty"`
+	Tag                *string       `json:"tag,omitempty"`
 }
 
 // RunJobReq 对齐 RunJobRequest(runJob2 body)。
@@ -237,7 +286,7 @@ func jobToDTO(j *domain.Job) JobInfoDTO {
 
 func instanceToDTO(ins *domain.Instance, jobParams string) InstanceInfoDTO {
 	return InstanceInfoDTO{
-		JobID:               ins.JobID, AppID: ins.AppID, InstanceID: ins.ID,
+		JobID: ins.JobID, AppID: ins.AppID, InstanceID: ins.ID,
 		JobParams:           jobParams,
 		InstanceParams:      ins.JobInstanceParams,
 		Status:              DomainToWire(ins.Status),
@@ -317,7 +366,7 @@ func (d OpenApiDeps) assertApp(c *gin.Context) {
 	}
 	app, err := d.Apps.GetByName(appName)
 	if err != nil {
-		c.JSON(http.StatusOK, ResultFail("app(" + appName + ")未注册"))
+		c.JSON(http.StatusOK, ResultFail("app("+appName+")未注册"))
 		return
 	}
 	c.JSON(http.StatusOK, ResultOK(app.ID))
@@ -386,7 +435,7 @@ func (d OpenApiDeps) queryJob(c *gin.Context) {
 func (d OpenApiDeps) saveJob(c *gin.Context) {
 	var r SaveJobReq
 	if err := c.ShouldBindJSON(&r); err != nil {
-		c.JSON(http.StatusOK, ResultFail("参数解析失败: " + err.Error()))
+		c.JSON(http.StatusOK, ResultFail("参数解析失败: "+err.Error()))
 		return
 	}
 	appID := appIDFrom(c, r.AppID)
@@ -414,7 +463,7 @@ func (d OpenApiDeps) saveJob(c *gin.Context) {
 			fields["description"] = *r.JobDescription
 		}
 		if r.TimeExpressionType != nil {
-			fields["schedule_kind"] = wireToScheduleKind(*r.TimeExpressionType)
+			fields["schedule_kind"] = wireToScheduleKind(timeExprCode(r.TimeExpressionType))
 		}
 		if r.TimeExpression != nil {
 			fields["schedule_expr"] = *r.TimeExpression
@@ -455,7 +504,7 @@ func (d OpenApiDeps) saveJob(c *gin.Context) {
 	}
 	// 表达式与类型必须配对:漏传 timeExpressionType 会落到 api,cron/fix_rate 表达式被静默忽略、
 	// 创建出永不自动调度的 job,客户端无错误反馈。
-	if r.TimeExpression != nil && *r.TimeExpression != "" && (r.TimeExpressionType == nil || *r.TimeExpressionType <= 0) {
+	if r.TimeExpression != nil && *r.TimeExpression != "" && (r.TimeExpressionType == nil || timeExprCode(r.TimeExpressionType) <= 0) {
 		c.JSON(http.StatusOK, ResultFail("提供 timeExpression 时必须同时指定 timeExpressionType"))
 		return
 	}
@@ -465,7 +514,7 @@ func (d OpenApiDeps) saveJob(c *gin.Context) {
 		Description:    strOrDefault(r.JobDescription),
 		Tag:            strOrDefault(r.Tag),
 		TimeoutSec:     int(int64Val(r.InstanceTimeLimit) / 1000),
-		ScheduleKind:   wireToScheduleKind(intVal(r.TimeExpressionType)),
+		ScheduleKind:   wireToScheduleKind(timeExprCode(r.TimeExpressionType)),
 		ScheduleExpr:   strOrDefault(r.TimeExpression),
 		StartTime:      msToTimePtr(r.StartTime),
 		EndTime:        msToTimePtr(r.EndTime),
@@ -591,7 +640,7 @@ func priorityFromInstanceParams(params string) int {
 // (见 priorityFromInstanceParams),其余仍按原样透传给 worker。
 func (d OpenApiDeps) runJob(c *gin.Context) {
 	if err := c.Request.ParseForm(); err != nil {
-		c.JSON(http.StatusOK, ResultFail("参数解析失败: " + err.Error()))
+		c.JSON(http.StatusOK, ResultFail("参数解析失败: "+err.Error()))
 		return
 	}
 	appID := formInt64(c, "appId")
@@ -607,7 +656,7 @@ func (d OpenApiDeps) runJob(c *gin.Context) {
 	instanceParams := c.PostForm("instanceParams")
 	instanceID, err := d.Jobs.TriggerReturnInstance(appID, jobID, priorityFromInstanceParams(instanceParams), instanceParams, delayMS, "openapi-runJob")
 	if err != nil {
-		c.JSON(http.StatusOK, ResultFail("触发失败: " + err.Error()))
+		c.JSON(http.StatusOK, ResultFail("触发失败: "+err.Error()))
 		return
 	}
 	c.JSON(http.StatusOK, ResultOK(instanceID))
@@ -618,7 +667,7 @@ func (d OpenApiDeps) runJob(c *gin.Context) {
 func (d OpenApiDeps) runJob2(c *gin.Context) {
 	var r RunJobReq
 	if err := c.ShouldBindJSON(&r); err != nil {
-		c.JSON(http.StatusOK, PowerResultFail("参数解析失败: " + err.Error()))
+		c.JSON(http.StatusOK, PowerResultFail("参数解析失败: "+err.Error()))
 		return
 	}
 	appID := appIDFrom(c, r.AppID)
@@ -636,7 +685,7 @@ func (d OpenApiDeps) runJob2(c *gin.Context) {
 	}
 	instanceID, err := d.Jobs.TriggerReturnInstance(appID, jobID, priorityFromInstanceParams(r.InstanceParams), r.InstanceParams, delayMS, "openapi-runJob2")
 	if err != nil {
-		c.JSON(http.StatusOK, PowerResultFail("触发失败: " + err.Error()))
+		c.JSON(http.StatusOK, PowerResultFail("触发失败: "+err.Error()))
 		return
 	}
 	c.JSON(http.StatusOK, PowerResultOK(instanceID))

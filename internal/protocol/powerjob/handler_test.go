@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http/httptest"
@@ -421,5 +422,57 @@ func TestOpenApiSaveJobUpdateCrossAppDenied(t *testing.T) {
 	j, _ = st.Job.Get(1, 1)
 	if j.Name != "renamed" {
 		t.Fatalf("job 名应已改为 renamed, got %q", j.Name)
+	}
+}
+
+// 回归:原版 PowerJob 客户端按枚举名发字符串 timeExpressionType("CRON"/"FIXED_DELAY"),
+// 早期 *int 字段反序列化报 "cannot unmarshal string into ... int"。现 TimeExprType 字符串/数字皆收。
+func TestOpenApiSaveJobTimeStringCompat(t *testing.T) {
+	d, st := newOpenApiDeps(t)
+	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
+
+	g := gin.New()
+	RegisterOpenApi(g.Group("/openApi"), d)
+	doPost := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/openApi/saveJob", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		g.ServeHTTP(w, req)
+		return w
+	}
+
+	cases := []struct {
+		typ, expr, wantKind string
+	}{
+		{`"CRON"`, "*/1 * * * *", "cron"},
+		{`"FIXED_DELAY"`, "60000", "fix_delay"},
+		{`"FIXED_RATE"`, "30000", "fix_rate"},
+		{`"API"`, "", "api"},
+		{`2`, "*/1 * * * *", "cron"}, // 数字 code 仍兼容
+	}
+	for i, c := range cases {
+		var resp ResultDTO
+		body := fmt.Sprintf(`{"appId":1,"jobName":"j%d","timeExpressionType":%s,"timeExpression":%q,"enable":true}`,
+			i, c.typ, c.expr)
+		if err := json.Unmarshal(doPost(body).Body.Bytes(), &resp); err != nil {
+			t.Fatalf("case %d 解析响应失败: %v", i, err)
+		}
+		if !resp.Success {
+			t.Fatalf("timeExpressionType=%s 应 success: %+v", c.typ, resp)
+		}
+		jobID := int64(resp.Data.(float64))
+		j, _ := st.Job.Get(1, jobID)
+		if j.ScheduleKind != c.wantKind {
+			t.Fatalf("timeExpressionType=%s → ScheduleKind=%q want %q", c.typ, j.ScheduleKind, c.wantKind)
+		}
+	}
+
+	// 非法枚举名应 fail(参数解析失败)
+	var resp ResultDTO
+	if err := json.Unmarshal(doPost(`{"appId":1,"jobName":"jx","timeExpressionType":"NOPE","timeExpression":"x","enable":true}`).Body.Bytes(), &resp); err != nil {
+		t.Fatalf("非法 case 解析响应失败: %v", err)
+	}
+	if resp.Success {
+		t.Fatal("非法 timeExpressionType 应 fail")
 	}
 }
