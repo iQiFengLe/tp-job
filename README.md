@@ -56,7 +56,7 @@ tp-job/
 ├── examples/http-worker/      # 最小 http worker 示例(/worker/* 协议)
 ├── web/                       # 前端管理台(React + antd),dist 嵌入二进制
 └── internal/
-    ├── domain/                # App/Job/Instance + 8 态状态机 + Executor/DispatchBody/SystemMetrics
+    ├── domain/                # App/Job/Instance + 9 态状态机 + Executor/DispatchBody/SystemMetrics
     ├── repository/            # GORM 仓储(App/Job/Instance + OpenDatabase + 终态守护)
     ├── instancelog/           # 实例日志:文件 + per-file 锁 + 同 root 聚合 + 清理
     ├── workerreg/             # worker 心跳注册表(按 AppID)+ PickFull(tag+score)
@@ -64,6 +64,7 @@ tp-job/
     ├── dispatch/              # 统一调度器 + Executor + reaper + RetryPump + 并发槽/排队
     ├── dservice/              # 领域服务(App/Job/Instance 业务)
     ├── auth/                  # 会话 store + 登录服务 + SessionAuth/RequireAdmin/AppScope
+    ├── wire/                  # 协议层共用 JSON 工具(FlexInt64,兼容多语言 worker 数值字段)
     ├── config/ logger/        # 配置加载 / slog+lumberjack 日志
     └── protocol/
         ├── own/               # 管理端 REST /api/*(dto + translator + 登录 + 权限矩阵)
@@ -80,7 +81,7 @@ worker 启动 → 心跳 {appName, workerAddress, systemMetrics, tags} (无 toke
                   │
 服务端 POST {jobParams, jobInstanceParams, jobId, jobInstanceId} → worker.workerAddress
                   │ (worker ACK 2xx = 已接收)
-实例: queued → dispatched → waiting_receive ──worker回报──→ running ──→ success/failed/timeout
+实例: queued ──派发──→ waiting_receive ──worker回报──→ running ──→ success/failed/timeout
                   │                                           │
                   │      worker 失联 ──reaper──→ failed        │
                   │      执行超时 ──reaper──→ timeout          │
@@ -205,8 +206,8 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false -trimpath -ldflag
 ```
 
 **Docker**:在 `docker/` 目录下 `docker compose up -d`(或仓库根 `docker compose -f docker/docker-compose.yml up -d`)。
-compose 经 `config.release.yaml` 设 release + 登录限流;镜像内
-`//go:embed` 前端,健康检查打 `/health`,DB 不可达返回 503 供探针判定)。首启种 `admin/admin123`,
+compose 经 `config.release.yaml` 设 release + 登录限流;镜像内 `//go:embed` 前端,
+健康检查打 `/health`,DB 不可达返回 503 供探针判定。首启种 `admin/admin123`,
 **登录后立即在「账户设置」改密**。
 
 **网络隔离(生产必做)**:用 nginx 前置反代 + IP 白名单(`geo`/`allow`-`deny` 块),仅放行可信 worker 网段访问
@@ -235,7 +236,7 @@ go build -buildvcs=false ./... && go vet -buildvcs=false ./... && go test -build
 cd web && npm run build      # 前端门槛:tsc + vite
 ```
 
-- 数据库无历史负担:drop 旧库重建即可(`app` / `job` / `job_instance` 三表由 AutoMigrate 创建)。
+- 数据库无历史负担:drop 旧库重建即可(`app` / `job` / `job_instance` / `instance_callback` / `admin_user` 五表由 AutoMigrate 创建)。
 - 调度器/reaper/retry 单测见 `internal/dispatch`;权限矩阵集成测试见 `internal/protocol/own`。
 
 ## 声明
