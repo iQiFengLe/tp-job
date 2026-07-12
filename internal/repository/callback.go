@@ -5,7 +5,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"task-schedule/internal/domain"
+	"dida/internal/domain"
 )
 
 // CallbackStore 实例状态变更回调记录的持久化。CallbackPump(dispatch/callback.go)

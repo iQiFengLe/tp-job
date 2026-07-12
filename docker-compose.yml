@@ -1,17 +1,17 @@
 services:
-  task-schedule:
+  dida:
     build: .
-    image: task-schedule:latest
-    container_name: task-schedule
+    image: dida:latest
+    container_name: dida
     restart: unless-stopped
     ports:
       - "8080:8080"
     environment:
-      TASK_SCHEDULE_DB_DRIVER: sqlite
+      DIDA_DB_DRIVER: sqlite
       TZ: Asia/Shanghai
-      # TASK_SCHEDULE_MYSQL_DSN: "user:pass@tcp(mysql:3306)/task_schedule?charset=utf8mb4&parseTime=True&loc=Local"
+      # DIDA_MYSQL_DSN: "user:pass@tcp(mysql:3306)/dida?charset=utf8mb4&parseTime=True&loc=Local"
       # ⚠ 容器化部署:必须是 PowerJob Worker 可达地址,绝不能用 127.0.0.1(那是容器自身)
-      # TASK_SCHEDULE_POWERJOB_SERVER_ADDRESS: "task-schedule:8080"
+      # DIDA_POWERJOB_SERVER_ADDRESS: "dida:8080"
     # 生产用 release 配置(config.release.yaml:mode=release + 登录限流)。
     # server.mode 不支持 env 覆盖(防降级绕过 release 限流强制),故通过指定配置文件设 release。
     # 管理员账户:首次启动 seed admin/admin123,登录后立即 Web 改密。
@@ -29,10 +29,10 @@ services:
   # ── 可选:MySQL(高负载生产建议替换 sqlite)──
   # mysql:
   #   image: mysql:8.4
-  #   container_name: task-schedule-mysql
+  #   container_name: dida-mysql
   #   restart: unless-stopped
   #   environment:
   #     MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD}
-  #     MYSQL_DATABASE: task_schedule
+  #     MYSQL_DATABASE: dida
   #   volumes:
   #     - ./mysql-data:/var/lib/mysql

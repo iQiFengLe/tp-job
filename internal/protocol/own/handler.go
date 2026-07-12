@@ -13,11 +13,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"task-schedule/internal/auth"
-	"task-schedule/internal/dservice"
-	"task-schedule/internal/protocol/powerjob"
-	"task-schedule/internal/repository"
-	"task-schedule/internal/workerreg"
+	"dida/internal/auth"
+	"dida/internal/dservice"
+	"dida/internal/protocol/powerjob"
+	"dida/internal/repository"
+	"dida/internal/workerreg"
 )
 
 // Deps own 协议依赖。

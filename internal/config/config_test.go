@@ -30,9 +30,9 @@ func TestApplyDefaultsInstanceRetention(t *testing.T) {
 
 func TestApplyEnvStillHandlesNonAccount(t *testing.T) {
 	// admin 账户 env 已废弃(走 DB),设了也不应有副作用;DB 驱动等非账户 env 仍生效。
-	t.Setenv("TASK_SCHEDULE_ADMIN_USERNAME", "ops")
-	t.Setenv("TASK_SCHEDULE_ADMIN_PASSWORD", "whatever")
-	t.Setenv("TASK_SCHEDULE_DB_DRIVER", "mysql")
+	t.Setenv("DIDA_ADMIN_USERNAME", "ops")
+	t.Setenv("DIDA_ADMIN_PASSWORD", "whatever")
+	t.Setenv("DIDA_DB_DRIVER", "mysql")
 	c := &Config{}
 	c.applyEnv()
 	if c.Database.Driver != "mysql" {

@@ -10,8 +10,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"task-schedule/internal/auth"
-	"task-schedule/internal/dservice"
+	"dida/internal/auth"
+	"dida/internal/dservice"
 )
 
 // hashPwd 已移除:admin 凭据改走真实 AdminUserService.SeedDefault(admin/admin123)。

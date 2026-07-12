@@ -13,8 +13,8 @@ import (
 	"net/http"
 	"time"
 
-	"task-schedule/internal/domain"
-	"task-schedule/internal/workerreg"
+	"dida/internal/domain"
+	"dida/internal/workerreg"
 )
 
 // server→worker 派发的 HTTP 路径(按 worker.protocol 选择);worker 端须注册同一路径,集中定义便于定位与演进。

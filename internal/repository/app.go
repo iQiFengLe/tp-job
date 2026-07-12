@@ -3,7 +3,7 @@ package repository
 import (
 	"gorm.io/gorm"
 
-	"task-schedule/internal/domain"
+	"dida/internal/domain"
 )
 
 type AppStore struct{ db *gorm.DB }

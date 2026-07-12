@@ -264,7 +264,7 @@ POST /server/reportLog               {instanceLogContents:[...]}
 ## 9. 管理端鉴权(账户 / 登录会话)
 
 - **管理员账户**:admin_user 表(首次启动 seed admin/admin123,Web 可改用户名/密码;**已迁出 config/env**,
-  `TASK_SCHEDULE_ADMIN_PASSWORD` 等环境变量不再生效)。release 模式由 `config.release.yaml` 控制(不再经 env 覆盖 mode)。
+  `DIDA_ADMIN_PASSWORD` 等环境变量不再生效)。release 模式由 `config.release.yaml` 控制(不再经 env 覆盖 mode)。
 - **应用账户**:`app` 表(AppName + Password)。
 - `POST /api/auth/login {ident, password}` → session token;先匹配 admins(管理员)否则匹配 `app.AppName`(应用)。
 - 后续 `Authorization: Bearer <token>`;`SessionAuth()` 解析 `{role, appID?}`。

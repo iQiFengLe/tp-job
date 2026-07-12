@@ -10,8 +10,8 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 
-	"task-schedule/internal/domain"
-	"task-schedule/internal/repository"
+	"dida/internal/domain"
+	"dida/internal/repository"
 )
 
 var (

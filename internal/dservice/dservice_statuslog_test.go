@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"task-schedule/internal/dispatch"
-	"task-schedule/internal/domain"
-	"task-schedule/internal/instancelog"
+	"dida/internal/dispatch"
+	"dida/internal/domain"
+	"dida/internal/instancelog"
 )
 
 // TestTruncate 验证按 rune 截断 + 超长追加省略号(按 rune 避免切断 UTF-8 多字节字符)。

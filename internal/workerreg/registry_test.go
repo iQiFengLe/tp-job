@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"task-schedule/internal/domain"
+	"dida/internal/domain"
 )
 
 func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }

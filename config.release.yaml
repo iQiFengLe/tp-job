@@ -11,17 +11,17 @@ server:
 database:
   driver: sqlite         # sqlite | mysql(生产高负载建议 mysql)
   sqlite:
-    path: ./data/task-schedule.db
+    path: ./data/dida.db
   mysql:
-    # 生产请用最小权限账号 + 强密码,或环境变量 TASK_SCHEDULE_MYSQL_DSN 注入。
-    dsn: "<user>:<password>@tcp(127.0.0.1:3306)/task_schedule?charset=utf8mb4&parseTime=True&loc=Local"
+    # 生产请用最小权限账号 + 强密码,或环境变量 DIDA_MYSQL_DSN 注入。
+    dsn: "<user>:<password>@tcp(127.0.0.1:3306)/dida?charset=utf8mb4&parseTime=True&loc=Local"
     max_open_conns: 50
     max_idle_conns: 10
 
 log:
   level: info
   dir: ./logs
-  file_name: task-schedule.log
+  file_name: dida.log
   max_size_mb: 100
   max_backups: 10
   max_age_days: 30
@@ -42,7 +42,7 @@ worker:
   warmup_seconds: 30   # reaper 启动宽限(避免重启误杀在飞实例);默认 30s
 
 powerjob:
-  # ⚠ 容器化部署必须是 worker 可达地址,绝不能用 127.0.0.1(那是容器自身);如 "task-schedule:8080"
+  # ⚠ 容器化部署必须是 worker 可达地址,绝不能用 127.0.0.1(那是容器自身);如 "dida:8080"
   server_address: "127.0.0.1:8080"
 
 auth:
@@ -61,5 +61,5 @@ pprof:
 debug:
   auto_login: false   # 生产关闭前端自动登录,任何人必须经登录页手输凭据
 
-# 环境变量(优先级高于本文件):TASK_SCHEDULE_DB_DRIVER / TASK_SCHEDULE_MYSQL_DSN / TASK_SCHEDULE_POWERJOB_SERVER_ADDRESS
+# 环境变量(优先级高于本文件):DIDA_DB_DRIVER / DIDA_MYSQL_DSN / DIDA_POWERJOB_SERVER_ADDRESS
 # server.mode 不支持 env 覆盖。

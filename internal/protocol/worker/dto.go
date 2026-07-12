@@ -5,7 +5,7 @@
 package worker
 
 import (
-	"task-schedule/internal/domain"
+	"dida/internal/domain"
 )
 
 // HeartbeatReq 心跳上报。SystemMetrics 复用 domain 类型(纯数据,稳定可复用)。

@@ -5,7 +5,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"task-schedule/internal/domain"
+	"dida/internal/domain"
 )
 
 type InstanceStore struct{ db *gorm.DB }

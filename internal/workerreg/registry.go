@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"task-schedule/internal/domain"
+	"dida/internal/domain"
 )
 
 // Protocol worker 接入协议。

@@ -7,10 +7,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"task-schedule/internal/dservice"
-	"task-schedule/internal/instancelog"
-	"task-schedule/internal/repository"
-	"task-schedule/internal/workerreg"
+	"dida/internal/dservice"
+	"dida/internal/instancelog"
+	"dida/internal/repository"
+	"dida/internal/workerreg"
 )
 
 // Deps worker 协议 handler 的依赖。

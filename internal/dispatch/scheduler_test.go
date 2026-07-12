@@ -15,10 +15,10 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 
-	"task-schedule/internal/domain"
-	"task-schedule/internal/instancelog"
-	"task-schedule/internal/repository"
-	"task-schedule/internal/workerreg"
+	"dida/internal/domain"
+	"dida/internal/instancelog"
+	"dida/internal/repository"
+	"dida/internal/workerreg"
 )
 
 func newTestStore(t *testing.T) *repository.Store {

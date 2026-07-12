@@ -9,7 +9,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"task-schedule/internal/domain"
+	"dida/internal/domain"
 )
 
 // Store domain 仓储聚合。

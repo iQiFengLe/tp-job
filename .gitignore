@@ -1,6 +1,8 @@
-# 构建产物
+# 构建产物(改名前 task-schedule* 一并忽略,防本地旧二进制误提交)
+/dida
+/dida.exe
+/dida-linux-*
 /task-schedule
-/task-schedule.exe
 /task-schedule-linux-*
 *.exe
 *.exe~

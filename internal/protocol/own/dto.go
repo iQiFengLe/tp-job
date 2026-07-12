@@ -8,8 +8,8 @@ import (
 	"errors"
 	"time"
 
-	"task-schedule/internal/domain"
-	"task-schedule/internal/workerreg"
+	"dida/internal/domain"
+	"dida/internal/workerreg"
 )
 
 // ===== App =====

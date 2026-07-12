@@ -5,8 +5,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"task-schedule/internal/auth"
-	"task-schedule/internal/dservice"
+	"dida/internal/auth"
+	"dida/internal/dservice"
 )
 
 // ===== 账户管理 DTO / 端点 =====

@@ -12,11 +12,11 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 
-	"task-schedule/internal/dispatch"
-	"task-schedule/internal/domain"
-	"task-schedule/internal/instancelog"
-	"task-schedule/internal/repository"
-	"task-schedule/internal/workerreg"
+	"dida/internal/dispatch"
+	"dida/internal/domain"
+	"dida/internal/instancelog"
+	"dida/internal/repository"
+	"dida/internal/workerreg"
 )
 
 func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }

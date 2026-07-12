@@ -1,4 +1,4 @@
-const TOKEN_KEY = 'task-schedule-token';
+const TOKEN_KEY = 'dida-token';
 
 export function loadToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);

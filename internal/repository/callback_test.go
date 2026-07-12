@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"task-schedule/internal/domain"
+	"dida/internal/domain"
 )
 
 func TestCallbackListDueAndTransitions(t *testing.T) {

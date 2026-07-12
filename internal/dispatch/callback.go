@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"task-schedule/internal/config"
-	"task-schedule/internal/domain"
-	"task-schedule/internal/repository"
+	"dida/internal/config"
+	"dida/internal/domain"
+	"dida/internal/repository"
 )
 
 // ===== CallbackBuilder(装配层注入,scheduler/dservice 在状态变更点调用) =====

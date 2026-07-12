@@ -6,11 +6,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"task-schedule/internal/domain"
-	"task-schedule/internal/dservice"
-	"task-schedule/internal/instancelog"
-	"task-schedule/internal/repository"
-	"task-schedule/internal/workerreg"
+	"dida/internal/domain"
+	"dida/internal/dservice"
+	"dida/internal/instancelog"
+	"dida/internal/repository"
+	"dida/internal/workerreg"
 )
 
 // Deps powerjob 协议依赖。

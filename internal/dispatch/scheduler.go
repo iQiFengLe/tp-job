@@ -12,11 +12,11 @@ import (
 	"sync"
 	"time"
 
-	"task-schedule/internal/domain"
-	"task-schedule/internal/instancelog"
-	"task-schedule/internal/repository"
-	"task-schedule/internal/schedtime"
-	"task-schedule/internal/workerreg"
+	"dida/internal/domain"
+	"dida/internal/instancelog"
+	"dida/internal/repository"
+	"dida/internal/schedtime"
+	"dida/internal/workerreg"
 )
 
 // Scheduler domain 调度器:周期扫描到期 Job → 认领(AdvanceNextRun 乐观锁)→ 经 Executor 派发。

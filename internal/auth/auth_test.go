@@ -10,7 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
 
-	"task-schedule/internal/domain"
+	"dida/internal/domain"
 )
 
 func init() { gin.SetMode(gin.TestMode) }

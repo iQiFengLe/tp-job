@@ -13,7 +13,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
-	"task-schedule/internal/config"
+	"dida/internal/config"
 )
 
 // OpenDatabase 按配置打开数据库(sqlite 或 mysql)并返回 *gorm.DB,不迁移表结构
