@@ -14,6 +14,14 @@ import WorkersView from './WorkersView';
 
 const { Header, Sider, Content } = Layout;
 
+const SELECTED_APP_KEY = 'task-schedule.selectedAppId';
+function storedAppId(): number | undefined {
+  const v = localStorage.getItem(SELECTED_APP_KEY);
+  if (!v) return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 type ViewKey = 'apps' | 'jobs' | 'instances' | 'workers';
 
 export default function Console(props: {
@@ -33,7 +41,7 @@ export default function Console(props: {
     return ['apps', 'jobs', 'instances', 'workers'].includes(seg) ? seg : (isAdmin ? 'apps' : 'jobs');
   })();
   const [apps, setApps] = useState<AppView[]>([]);
-  const [selectedAppId, setSelectedAppId] = useState<number | undefined>(me.app_id);
+  const [selectedAppId, setSelectedAppId] = useState<number | undefined>(() => storedAppId() ?? me.app_id);
   const [appsLoading, setAppsLoading] = useState(false);
   const [health, setHealth] = useState<{ status: string; driver: string }>();
   const [accountOpen, setAccountOpen] = useState(false);
@@ -43,9 +51,12 @@ export default function Console(props: {
     setAppsLoading(true);
     try {
       const data = await api.apps.list({ page: 1, size: 200 });
-      setApps(data.list || []);
-      if (selectedAppId === undefined && data.list?.[0]) {
-        setSelectedAppId(data.list[0].id);
+      const list = data.list || [];
+      setApps(list);
+      // 选中 app 不在列表(被删/首次/历史残留)→ 回退首个并持久化,避免落到无效 id
+      if (list.length && !list.some((a) => a.id === selectedAppId)) {
+        setSelectedAppId(list[0].id);
+        localStorage.setItem(SELECTED_APP_KEY, String(list[0].id));
       }
     } catch (error) {
       handleError(error);
@@ -64,6 +75,10 @@ export default function Console(props: {
 
   const currentAppId = isAdmin ? selectedAppId : me.app_id;
   const currentApp = apps.find((item) => item.id === selectedAppId);
+  const chooseApp = (id: number) => {
+    setSelectedAppId(id);
+    localStorage.setItem(SELECTED_APP_KEY, String(id));
+  };
 
   const menuItems = [
     ...(isAdmin ? [{ key: 'apps', icon: <AppstoreOutlined />, label: '应用' }] : []),
@@ -95,7 +110,7 @@ export default function Console(props: {
                 className="app-switch"
                 placeholder="选择应用"
                 value={selectedAppId}
-                onChange={setSelectedAppId}
+                onChange={chooseApp}
                 options={apps.map((item) => ({ label: `${item.app_name} (${item.id})`, value: item.id }))}
                 loading={appsLoading}
               />
