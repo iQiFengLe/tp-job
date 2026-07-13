@@ -90,7 +90,7 @@ worker 启动 → 心跳 {appName, workerAddress, systemMetrics, tags} (无 toke
 
 - **异步派发**:POST 仅交付任务(2xx=已接收),worker 异步执行后回调上报终态。
 - **任务级并发槽**随实例生命周期(派发后绑定,终态/reaper 释放);`MaxConcurrency` 按在飞实例数计。
-- **reaper**:扫 `waiting_receive`/`running`,worker 心跳超时 → `failed`;执行超 `TimeoutSec` → `timeout`;均触发重试。
+- **reaper**:扫 `waiting_receive`/`running` 做失败转移——worker 心跳超时(失联)→ `failed`;`waiting_receive` 超 `receive_timeout_seconds`(worker 收到 `/run` 后迟迟不进入 `running`:繁忙/卡住/上报丢失)→ `failed`;执行超 `TimeoutSec` → `timeout`;均触发重试。后两项是"worker 繁忙但心跳正常、任务卡死"场景的核心兜底。
 - **RetryPump**:扫 `failed`/`timeout` 且 `next_retry_time` 到期,按 `retryIndex+1` 重派(DB 驱动,重启不丢)。
 - **at-least-once**:worker 迟到回报可能与重派实例并存,业务需自行幂等。
 

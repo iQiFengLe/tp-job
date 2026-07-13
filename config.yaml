@@ -41,6 +41,7 @@ scheduler:
 worker:
   timeout_seconds: 600   # worker 心跳超时(秒),超过视为离线(reaper 据此失败转移)。默认 10 分钟
   warmup_seconds: 30     # reaper 启动宽限:窗口内跳过"worker 失联"判定,给重启后 worker 重新心跳注册留时间(避免误杀重启前在飞的实例)。默认 30s(≥ 典型 10s 心跳 + 余量)
+  receive_timeout_seconds: 60  # waiting_receive 接收超时(秒):实例已派发但 worker 迟迟不进入 running(繁忙/卡住/上报丢失),超此值即 failed 重派,不再等满 TimeoutSec。仅 waiting_receive 生效;0=关闭(兼容不报 running 的旧 worker)。前提:worker 收到任务后及时回报 running
 
 powerjob:
   # /server/* 始终挂载(标准 PowerJob Java worker 不改源码接入)。⚠ /server/*、/worker/* 无鉴权,

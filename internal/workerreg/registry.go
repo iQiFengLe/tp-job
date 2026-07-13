@@ -36,17 +36,23 @@ type WorkerInfo struct {
 
 // Registry worker 心跳注册表。
 type Registry struct {
-	mu      sync.RWMutex
-	workers map[int64]map[string]*WorkerInfo // appID -> address -> info
-	timeout time.Duration
-	log     *slog.Logger
+	mu       sync.RWMutex
+	workers  map[int64]map[string]*WorkerInfo // appID -> address -> info
+	inflight map[int64]map[string]int         // appID -> address -> 在飞实例数(派发成功 +1 / 终态 -1,负载感知选址用)
+	timeout  time.Duration
+	log      *slog.Logger
 }
 
 func New(timeout time.Duration, log *slog.Logger) *Registry {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	return &Registry{workers: make(map[int64]map[string]*WorkerInfo), timeout: timeout, log: log}
+	return &Registry{
+		workers:  make(map[int64]map[string]*WorkerInfo),
+		inflight: make(map[int64]map[string]int),
+		timeout:  timeout,
+		log:      log,
+	}
 }
 
 // Heartbeat 注册或刷新一个 worker。
@@ -119,12 +125,19 @@ func (r *Registry) PickFull(appID int64, jobTag string) (WorkerInfo, bool) {
 	defer r.mu.RUnlock()
 	online := r.onlineLocked(appID)
 	var best *WorkerInfo
+	bestInflight := 0
 	for _, w := range online {
 		if !matchTag(jobTag, w) {
 			continue
 		}
-		if best == nil || w.Metrics.Score > best.Metrics.Score {
+		// 负载感知:在飞实例少的 worker 优先(把任务分散到空闲节点,避免反复派给繁忙 worker——
+		// 后者正是"worker 繁忙但心跳正常、任务卡在 waiting_receive"的成因之一);在飞相同时
+		// 回退 Score 降序(PowerJob 约定:分数越高越空闲)。
+		inflight := r.inflightLocked(appID, w.WorkerAddress)
+		if best == nil || inflight < bestInflight ||
+			(inflight == bestInflight && w.Metrics.Score > best.Metrics.Score) {
 			best = w
+			bestInflight = inflight
 		}
 	}
 	if best == nil {
@@ -160,6 +173,72 @@ func (r *Registry) IsOnline(appID int64, address string) bool {
 	return time.Since(w.LastHeartbeat) <= r.timeout
 }
 
+// inflightLocked 读 worker 当前在飞实例数(调用方持 mu)。无记录=0。供 PickFull 负载感知选址。
+func (r *Registry) inflightLocked(appID int64, addr string) int {
+	if m, ok := r.inflight[appID]; ok {
+		return m[addr]
+	}
+	return 0
+}
+
+// Inflight 返回 worker 当前在飞实例数(供测试/管理端诊断负载)。持 RLock 读。
+func (r *Registry) Inflight(appID int64, addr string) int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.inflightLocked(appID, addr)
+}
+
+// AcquireInflight 派发成功(Send 完成)后调用:记录该 worker 在飞实例 +1。addr 为 PickFull 选定、
+// MarkDispatched/Send 使用的原值(与心跳注册 key 一致);addr 空(no-op)防误调。
+// 仅影响后续 PickFull 选址打分,不改变 worker 在线性/任务级并发槽(后者由 scheduler.slots 管)。
+func (r *Registry) AcquireInflight(appID int64, addr string) {
+	if addr == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	m, ok := r.inflight[appID]
+	if !ok {
+		m = make(map[string]int)
+		r.inflight[appID] = m
+	}
+	m[addr]++
+}
+
+// ReleaseInflight 实例终态/失败转移时调用:在飞实例 -1。幂等——未 Acquire 过或已归零时 no-op,
+// 不会变负(worker 重启/异常路径可能多调一次 Release)。归零删 key(与 Sweep 共用 deleteInflightLocked)
+// 防 inflight map 无限增长。
+func (r *Registry) ReleaseInflight(appID int64, addr string) {
+	if addr == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	m, ok := r.inflight[appID]
+	if !ok {
+		return
+	}
+	if m[addr] <= 1 {
+		r.deleteInflightLocked(appID, addr)
+	} else {
+		m[addr]--
+	}
+}
+
+// deleteInflightLocked 删除 worker 的在飞计数条目(调用方持 mu)。供 ReleaseInflight 归零删 key 与 Sweep
+// 清理下线 worker 复用:worker 下线时其 inflight 已无意义,直接删整个 addr 条目(非递减),防泄漏计数随
+// worker churn 累积、同址重连继承陈旧值扭曲 PickFull 选址。
+func (r *Registry) deleteInflightLocked(appID int64, addr string) {
+	im, ok := r.inflight[appID]
+	if !ok {
+		return
+	}
+	delete(im, addr)
+	if len(im) == 0 {
+		delete(r.inflight, appID)
+	}
+}
+
 // Online 在线 worker 列表副本(供管理端展示)。
 func (r *Registry) Online(appID int64) []WorkerInfo {
 	r.mu.RLock()
@@ -181,6 +260,7 @@ func (r *Registry) Sweep() int {
 		for addr, w := range m {
 			if time.Since(w.LastHeartbeat) > r.timeout {
 				delete(m, addr)
+				r.deleteInflightLocked(appID, addr) // 同步清在飞计数:worker 下线后其计数无意义,防泄漏/陈旧残留
 				removed++
 			}
 		}

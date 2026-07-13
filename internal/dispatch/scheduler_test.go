@@ -614,7 +614,7 @@ func TestDispatchAbortsOnConcurrentTerminal(t *testing.T) {
 	if err := st.Instance.SetStatus(ins.ID, domain.StatusStopped, "并发停止"); err != nil {
 		t.Fatal(err)
 	}
-	sch.bindHeld(ins.ID, job.ID) // 模拟 runManualHeld/retryInstance 派发前的前置绑定
+	sch.bindHeld(ins.ID, job.AppID, job.ID) // 模拟 runManualHeld/retryInstance 派发前的前置绑定
 
 	failed := sch.dispatchToWorker(context.Background(), job, ins, "测试")
 

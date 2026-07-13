@@ -56,8 +56,10 @@ func (s *InstanceService) ReportStatus(id int64, status, result string) error {
 	if err != nil {
 		return err
 	}
-	if rows > 0 {
-		// 终态守护 rows==0(迟到回报/终态重放)不写,避免噪音。
+	if rows > 0 && oldStatus != status {
+		// 终态守护 rows==0(迟到回报/终态重放)不写;oldStatus!=status 防同状态重复上报(postJSONRetry 重试
+		// running 等)写"running→running"噪音——SQLite 同值 UPDATE 仍 RowsAffected=1(changes 计匹配行非变更行),
+		// MySQL 默认计变更行返 0,加此条件使跨驱动一致且只在真变迁时记。
 		level := "info"
 		if status == domain.StatusFailed || status == domain.StatusTimeout {
 			level = "warn"
@@ -87,6 +89,9 @@ func (s *InstanceService) statusCallback(id int64, status, result string) func(*
 	if domain.StatusTerminal(ins.Status) {
 		return nil
 	}
+	if ins.Status == status {
+		return nil // 同状态短路:重复上报不重复通知(同 statusCallbackFrom,防 SQLite rows>0 误触)
+	}
 	// ⚠ job 必须在事务外预查:build 闭包在 *WithCallback 事务回调内被调用,若闭包内用 s.st.Job
 	// (根 db)查 job 会从连接池拿到另一条连接——该查询不在本事务内,读不到事务未提交数据,破坏隔离
 	// (MaxOpenConns=1 时代是直接死锁:唯一连接被事务占着自己等自己,曾导致 reportInstanceStatus
@@ -106,6 +111,11 @@ func (s *InstanceService) statusCallbackFrom(ins *domain.Instance, status string
 	}
 	if domain.StatusTerminal(ins.Status) {
 		return nil // 终态短路:守护会让 rows==0,无需构造
+	}
+	if ins.Status == status {
+		// 同状态短路:重复上报(postJSONRetry 重试 running 等)不重复通知。SQLite 同值 UPDATE 仍 RowsAffected=1
+		// 会误触 callback 插入,此处按"非真变迁"静默,与 ReportStatus 日志 oldStatus!=status 判定一致。
+		return nil
 	}
 	job, _ := s.st.Job.Get(ins.AppID, ins.JobID) // 事务外预查(同 statusCallback 死锁约束)
 	return func(latest *domain.Instance) *domain.Callback {

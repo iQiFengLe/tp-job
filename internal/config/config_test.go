@@ -28,6 +28,25 @@ func TestApplyDefaultsInstanceRetention(t *testing.T) {
 	}
 }
 
+// TestApplyDefaultsReceiveTimeout 接收超时默认/关闭:nil(未设置)→60;显式 0(*int 非 nil)保留=关闭,
+// 兼容不报 running、waiting_receive→success 直跳的旧 worker(否则其长任务被误杀)。
+// 用 *int 区分"未设"与"显式 0":普通 int 的 ==0 默认会把用户显式配的 0 也覆盖成默认值,逃生口失效。
+func TestApplyDefaultsReceiveTimeout(t *testing.T) {
+	c := &Config{}
+	c.applyDefaults()
+	if c.Worker.ReceiveTimeoutSeconds == nil {
+		t.Fatal("未设置应兜底为非 nil 60")
+	} else if *c.Worker.ReceiveTimeoutSeconds != 60 {
+		t.Fatalf("未设置应兜底 60, got %d", *c.Worker.ReceiveTimeoutSeconds)
+	}
+	zero := 0
+	c2 := &Config{Worker: Worker{ReceiveTimeoutSeconds: &zero}}
+	c2.applyDefaults()
+	if c2.Worker.ReceiveTimeoutSeconds == nil || *c2.Worker.ReceiveTimeoutSeconds != 0 {
+		t.Fatalf("显式 0(关闭)不应被兜底覆盖, got %v", c2.Worker.ReceiveTimeoutSeconds)
+	}
+}
+
 func TestApplyEnvStillHandlesNonAccount(t *testing.T) {
 	// admin 账户 env 已废弃(走 DB),设了也不应有副作用;DB 驱动等非账户 env 仍生效。
 	t.Setenv("TP_JOB_ADMIN_USERNAME", "ops")

@@ -20,6 +20,16 @@ type HeartbeatReq struct {
 
 // ReportStatusReq worker 回报实例状态(领域 string 状态码)。
 // WorkerAddress 为上报者自报地址,须与实例绑定的 worker_address 一致(归属校验,防伪造 id 篡改他人实例)。
+//
+// 协议约定(影响服务端卡死回收判定):
+//   - 收到 /run 开始执行时尽快回报 running——让服务端把实例从 waiting_receive 推进到 running,
+//     标记"已接收并开始执行"。服务端据此区分"在执行"(running)与"卡死未接收"(持续 waiting_receive);
+//     后者超 worker.receive_timeout_seconds 即判 failed 重派。从不报 running 的旧 worker 仍兼容
+//     (配 receive_timeout_seconds=0 关闭接收超时),但实例全程停在 waiting_receive 直到终态,卡死时
+//     只能等执行超时(TimeoutSec)——故新接入 worker 强烈建议及时报 running。
+//   - running 与终态(success/failed)均应 at-least-once 重试上报:服务端终态守护(已终态不覆盖)+
+//     running→running 幂等,重复上报无副作用。running 丢失会致服务端不知 worker 已在执行 → 接收超时
+//     误杀重派 → 重复执行,故 running 与终态一样必须可靠送达。logs 为非关键日志,失败可丢。
 type ReportStatusReq struct {
 	WorkerAddress string `json:"workerAddress"`
 	Status        string `json:"status"`

@@ -121,6 +121,10 @@ func main() {
 	// reaper 启动宽限:避免服务重启时 workerreg 尚空、worker 未及重新心跳,被 reaper 误判失联而批量
 	// 失败转移"重启前在飞"的实例(导致重复执行)。默认 30s(cfg.Worker.WarmupSeconds)。
 	sch.SetReaperWarmup(time.Duration(cfg.Worker.WarmupSeconds) * time.Second)
+	// waiting_receive 接收超时:worker 收到 /run 后迟迟不进入 running(繁忙/卡住/上报丢失),实例不再
+	// 干等满整个 TimeoutSec——超 receiveTimeout 即 failed 重派(配合负载感知选址可能选到其他空闲 worker)。
+	// 默认 60s。前提:worker 收到任务后应及时回报 running(见 worker 协议约定/examples)。
+	sch.SetReceiveTimeout(time.Duration(*cfg.Worker.ReceiveTimeoutSeconds) * time.Second)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -72,6 +72,14 @@ type CallbackCfg struct {
 type Worker struct {
 	TimeoutSeconds int `yaml:"timeout_seconds"` // worker 心跳超时(秒),超过视为离线
 	WarmupSeconds  int `yaml:"warmup_seconds"`  // reaper 启动宽限(秒):窗口内跳过"worker 失联"判定,给重启后 worker 重新心跳注册留时间,避免误杀重启前在飞的正常实例(默认 30)
+
+	// ReceiveTimeoutSeconds waiting_receive 接收超时(秒):实例已派发但 worker 迟迟未回报 running/终态,
+	// 超过此值即判 failed 并重派(可能选到其他空闲 worker),不再干等满整个 TimeoutSec。仅对 waiting_receive
+	// 生效——running 已确认 worker 在执行,仍走执行超时(TimeoutSec)。默认 60;0=关闭(兼容从不报 running、
+	// waiting_receive→success 直跳的旧 worker,否则其长任务会被误杀)。用 *int 区分"未配置"(nil→默认 60)
+	// 与"显式 0"(关闭):普通 int 的 ==0 默认会把用户显式配的 0 也覆盖成默认值,逃生口失效。前提:worker
+	// 收到 /run 后应及时回报 running。
+	ReceiveTimeoutSeconds *int `yaml:"receive_timeout_seconds"`
 }
 
 // PowerJob 兼容协议配置。/server/* + /openApi/* 端点始终挂载(供遵循 PowerJob 协议的自研 http worker /
@@ -222,6 +230,10 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Worker.WarmupSeconds == 0 {
 		c.Worker.WarmupSeconds = 30
+	}
+	if c.Worker.ReceiveTimeoutSeconds == nil {
+		v := 60 // 未配置→默认 60s;用户显式配 0(*int 非 nil)保留为 0=关闭,兼容不报 running 的旧 worker
+		c.Worker.ReceiveTimeoutSeconds = &v
 	}
 	if c.Auth.Session.TTLSeconds == 0 {
 		c.Auth.Session.TTLSeconds = 86400

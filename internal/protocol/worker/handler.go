@@ -59,6 +59,9 @@ func (d Deps) heartbeat(c *gin.Context) {
 	ok(c, gin.H{"ok": true})
 }
 
+// reportStatus worker/管理端上报实例状态。归属校验(上报 worker 须与实例绑定一致)+ 终态守护(已终态不覆盖,
+// 乱序/迟到/重复上报不覆盖)+ 终态时释放任务级槽。worker 应在收到 /run 开始执行时即报 running,终态上报
+// 失败应重试(幂等)——详见 ReportStatusReq 协议约定,关系到服务端 waiting_receive 接收超时能否生效。
 func (d Deps) reportStatus(c *gin.Context) {
 	iid := paramInt64(c, "iid")
 	var req ReportStatusReq

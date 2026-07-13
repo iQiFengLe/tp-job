@@ -62,11 +62,12 @@ func main() {
 	log.Fatal(http.ListenAndServe(*addr, mux))
 }
 
-// runHandler 处理服务端派发:解析 body → 立即 ACK 2xx(对齐异步派发语义,服务端据此置 waiting_receive)
-// → 异步执行(回显)→ 回报 success + 日志。
+// runHandler 处理服务端派发:解析 body → 立即 ACK 2xx(服务端据此置 waiting_receive)→ 异步:
+// 先回报 running(确认"已接收并开始执行",支撑服务端 waiting_receive 接收超时判定)→ 执行(回显)
+// → 回报 success(指数退避重试,终态守护保证幂等)+ 日志。
 //
-// 立即 ACK 是关键:服务端 POST /run 仅交付任务(2xx=已接收),worker 异步执行后回调上报终态。
-// 若在返回 2xx 前就同步上报终态,会与"派发→waiting_receive"竞态(已被终态守护兜住,但应避免)。
+// 立即 ACK 是关键:服务端 POST /run 仅交付任务(2xx=已接收),worker 异步执行后回调上报状态推进。
+// running/success 均在 ACK 之后异步发出,不与"派发→waiting_receive"竞态(亦被终态守护兜住)。
 func runHandler(server, workerAddr string, w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		JobParams         string `json:"jobParams"`
@@ -84,16 +85,28 @@ func runHandler(server, workerAddr string, w http.ResponseWriter, r *http.Reques
 
 	// 异步执行 + 回报(不阻塞 ACK)
 	go func() {
+		// 先回报 running(at-least-once 重试):让服务端把实例从 waiting_receive 推进到 running,作为"已接收
+		// 并开始执行"的信号——据此区分"在正常执行"(running)与"卡死未接收"(持续 waiting_receive,后者超
+		// receive_timeout 即判 failed 重派)。running 必须可靠送达:丢失会致服务端不知 worker 已在执行 → 接收
+		// 超时误杀重派 → 重复执行(与"卡死兜底"初衷相悖)。重复 running 上报幂等(终态守护 + running→running 无害)。
+		postJSONRetry(server+"/worker/instances/"+fmt.Sprint(body.JobInstanceID)+"/status", map[string]any{
+			"workerAddress": workerAddr,
+			"status":        "running",
+			"result":        "started",
+		})
+
 		time.Sleep(time.Second) // 模拟执行
 		result := fmt.Sprintf("done: jobParams=%s instanceParams=%s", body.JobParams, body.JobInstanceParams)
+		// 日志上报:服务端对齐 PowerJob 始终 200(不反压),失败可丢
 		postJSON(server+"/worker/instances/"+fmt.Sprint(body.JobInstanceID)+"/logs", map[string]any{
 			"level":   "info",
 			"message": "示例 worker 执行完成: " + result,
 			"time":    time.Now().UnixMilli(),
 		})
-		postJSON(server+"/worker/instances/"+fmt.Sprint(body.JobInstanceID)+"/status", map[string]any{
-			"workerAddress": workerAddr, // 归属校验:须与实例绑定的 worker 一致(B2)
-			"status":        "success",  // 终态:waiting_receive → success
+		// 终态上报用指数退避重试:终态守护保证幂等(重复 success 不覆盖),上报丢失不致实例卡死。
+		postJSONRetry(server+"/worker/instances/"+fmt.Sprint(body.JobInstanceID)+"/status", map[string]any{
+			"workerAddress": workerAddr, // 归属校验:须与实例绑定的 worker 一致
+			"status":        "success",  // 终态:running → success
 			"result":        result,
 		})
 	}()
@@ -146,4 +159,22 @@ func postJSON(url string, body any) error {
 		return fmt.Errorf("%s -> %d", url, resp.StatusCode)
 	}
 	return nil
+}
+
+// postJSONRetry 带指数退避重试的 POST,用于"服务端必须收到"的关键状态上报(running / 终态 success/failed)。
+// 服务端 reportStatus 终态守护(已终态不覆盖)+ running→running 幂等,保证重复上报无副作用,对抗"上报请求
+// 丢失":running 丢失致服务端不知 worker 已在执行→接收超时误杀重派;终态丢失致实例卡死直到超时。重试耗尽
+// 后放弃——服务端 reaper(接收超时/worker 失联)兜底失败转移。logs 等非关键上报用 postJSON 即可。
+func postJSONRetry(url string, body any) {
+	// 切片驱动:索引 0 立即首次尝试(0 延迟),其后为重试退避间隔。切片长度即总尝试次数,消除"常量必须
+	// 与切片长度同步"的耦合(改尝试次数只需改切片,不会因常量与长度不一致而越界 panic)。
+	backoffs := []time.Duration{0, time.Second, 2 * time.Second}
+	for i, b := range backoffs {
+		time.Sleep(b)
+		err := postJSON(url, body)
+		if err == nil {
+			return
+		}
+		log.Printf("关键状态上报失败(尝试 %d/%d): %v -> %s", i+1, len(backoffs), err, url)
+	}
 }

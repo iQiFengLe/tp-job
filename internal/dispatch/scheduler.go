@@ -45,8 +45,8 @@ type Scheduler struct {
 	wake    chan struct{}
 
 	slotMu sync.Mutex
-	slots  map[int64]int   // jobID -> 在飞实例计数(auto+manual 共享)
-	held   map[int64]int64 // instanceID -> jobID(在飞绑定,供终态按实例释放)
+	slots  map[int64]int      // jobID -> 在飞实例计数(auto+manual 共享)
+	held   map[int64]heldSlot // instanceID -> 绑定信息(供终态按实例释放槽 + worker 在飞计数)
 
 	// wg 跟踪由 Start 启动的循环及派发子协程(execute/runManualHeld),供 Wait 优雅关闭:
 	// main cancel 后等它们退出再关 DB,避免关闭期 DB 写入与 sqlDB.Close 竞态。
@@ -63,6 +63,17 @@ type Scheduler struct {
 	// startedAt 取 NewScheduler 时刻作为 warmup 起算点(覆盖装配到 reaper 首轮的全程)。
 	warmup    time.Duration
 	startedAt time.Time
+
+	// receiveTimeout:实例停在 waiting_receive(已派发但 worker 从未回报 running/终态)超过此阈值即判
+	// failed 重派——worker 收到 /run 后迟迟未拉起执行(繁忙队列堆积/卡住/掉单/上报丢失)。仅 waiting_receive
+	// 生效(running 已确认在执行,走执行超时 TimeoutSec)。零值=关闭:兼容 waiting_receive→success 直跳、
+	// 从不报 running 的旧 worker(开启会误杀其长任务)。生产由 SetReceiveTimeout 注入(默认 60s)。
+	receiveTimeout time.Duration
+
+	// reg worker 注册表句柄(Start 时注入):派发成功 AcquireInflight / 终态 ReleaseInflight,
+	// 维护 worker 在飞计数供 PickFull 负载感知选址(在飞少的优先)。nil(测试/未 Start)时跳过计数,
+	// bindWorkerAddr/releaseByInstance 均守护 nil,不影响任务级并发槽逻辑。
+	reg *workerreg.Registry
 }
 
 // NewScheduler 创建调度器。interval 为扫描周期。
@@ -77,7 +88,7 @@ func NewScheduler(st *repository.Store, exec domain.Executor, il *instancelog.Lo
 		store: st, executor: exec, il: il, log: log, cbBuilder: cbBuilder,
 		interval: interval, limit: 500,
 		wake:    make(chan struct{}, 1),
-		slots:   make(map[int64]int), held: make(map[int64]int64),
+		slots:   make(map[int64]int), held: make(map[int64]heldSlot),
 		pqIndex: make(map[int64]*manualItem),
 		timers:  make(map[int64]*time.Timer),
 		startedAt: time.Now(),
@@ -91,6 +102,13 @@ func (s *Scheduler) SetReaperWarmup(d time.Duration) {
 	s.warmup = d
 }
 
+// SetReceiveTimeout 设置 waiting_receive 接收超时(装配层从 cfg.Worker.ReceiveTimeoutSeconds 注入,默认 60s)。
+// <=0 关闭——兼容从不报 running、waiting_receive→success 直跳的旧 worker(开启会误杀其长任务:实例全程
+// waiting_receive 直到 success,若执行耗时长于 receiveTimeout 会被误判 failed)。生产不应关闭。
+func (s *Scheduler) SetReceiveTimeout(d time.Duration) {
+	s.receiveTimeout = d
+}
+
 // inWarmup 是否处于 reaper 启动宽限窗口(warmup 内 stallReason 跳过 worker 失联判定)。
 func (s *Scheduler) inWarmup(now time.Time) bool {
 	return s.warmup > 0 && now.Sub(s.startedAt) < s.warmup
@@ -99,6 +117,7 @@ func (s *Scheduler) inWarmup(now time.Time) bool {
 // Start 启动四个后台循环(定时调度 / 手动派发 / reaper / retry),全部纳入 wg 跟踪。reg 为 reaper
 // 判定 worker 在线性所需。main 应在 HTTP 启动前调用;优雅关闭时 cancel ctx 后调 Wait。
 func (s *Scheduler) Start(ctx context.Context, reg *workerreg.Registry) {
+	s.reg = reg // 存句柄:派发 AcquireInflight / 终态 ReleaseInflight(负载感知选址);派发循环在 Start 后才跑,来得及
 	s.goTrack(func() { s.Run(ctx) })
 	s.goTrack(func() { s.RunManualDispatcher(ctx) })
 	s.goTrack(func() { s.RunInstanceReaper(ctx, reg) })
@@ -277,7 +296,7 @@ func (s *Scheduler) execute(ctx context.Context, job *domain.Job, oldNext time.T
 		return
 	}
 	s.appendLog(job, ins, "CREATE", "info", "实例创建")
-	s.bindHeld(ins.ID, job.ID) // 先绑:保证后续任一终态路径能经 ReleaseInFlight 释放
+	s.bindHeld(ins.ID, job.AppID, job.ID) // 先绑:保证后续任一终态路径能经 ReleaseInFlight 释放
 
 	// 选后即绑派发:PickWorker → MarkDispatched → Send,任一失败由 dispatchToWorker 统一善后
 	// (UpdateResult failed + 衔接 RetryPump 重试;RetryCount=0 时 scheduleRetry 定格 failed 无副作用,
@@ -468,7 +487,7 @@ func (s *Scheduler) runManualHeld(ctx context.Context, item *manualItem) {
 		s.releaseByJob(item.job.ID)
 		return
 	}
-	s.bindHeld(item.ins.ID, item.job.ID)
+	s.bindHeld(item.ins.ID, item.job.AppID, item.job.ID)
 	// 选后即绑派发(同 execute,详见 dispatchToWorker)。
 	if s.dispatchToWorker(ctx, item.job, item.ins, "手动触发派发") {
 		return
@@ -621,26 +640,63 @@ func (s *Scheduler) releaseByJob(jobID int64) {
 	s.notifyWake() // 槽空出:唤醒手动派发器重试排队实例
 }
 
+// heldSlot 实例在飞时绑定的槽信息:jobID 用于按 job 释放并发槽(s.slots);appID+addr 用于
+// 按 worker 释放服务端在飞计数(reg.ReleaseInflight,负载感知选址)。addr 在 bindHeld 时留空
+// (此时 worker 尚未选定),派发 Send 成功后由 bindWorkerAddr 回填。
+type heldSlot struct {
+	appID int64
+	jobID int64
+	addr  string
+}
+
 // bindHeld 将"已 tryAcquire 的槽"绑定到实例(不重复 +1,仅记映射),供终态按实例释放。
-func (s *Scheduler) bindHeld(insID, jobID int64) {
+// worker 此时未选定(PickWorker 在 dispatchToWorker 内),addr 留空;Send 成功后 bindWorkerAddr 回填。
+func (s *Scheduler) bindHeld(insID, appID, jobID int64) {
 	s.slotMu.Lock()
-	s.held[insID] = jobID
+	s.held[insID] = heldSlot{appID: appID, jobID: jobID}
+	s.slotMu.Unlock()
+}
+
+// bindWorkerAddr 派发 Send 成功后补充记录实例绑定的 worker 地址 + Acquire 该 worker 在飞计数。
+// addr 为 PickFull 选定、MarkDispatched/Send 使用的原值(与 reg inflight key 一致);appID 从 held 取
+// (bindHeld 时已写入 job.AppID),无需调用方传——避免传错 + 减参数。
+//
+// Acquire 在 slotMu 锁内与 addr 写回原子完成(仅 held 命中时):彻底消除 TOCTOU——若 Acquire 放锁外,
+// Unlock 与 Acquire 之间并发 releaseByInstance 会读到已回填的 addr、先 Release(计数 0 no-op)并删 held,
+// 随后本 Acquire 落下成无配对 Release 的 +1 泄漏(实例已终态无人再 Release)。held 未命中(已被并发释放)
+// 则跳过:releaseByInstance 已按"未 Acquire"自洽(此时 addr 仍空未 Release)。锁序 slotMu→reg.mu 单向
+// (reg 不回调 scheduler;releaseByInstance 同序且其 Release 在释 slotMu 后),无死锁。
+func (s *Scheduler) bindWorkerAddr(insID int64, addr string) {
+	s.slotMu.Lock()
+	h, ok := s.held[insID]
+	if ok {
+		h.addr = addr
+		s.held[insID] = h
+		if s.reg != nil && addr != "" {
+			s.reg.AcquireInflight(h.appID, addr)
+		}
+	}
 	s.slotMu.Unlock()
 }
 
 // releaseByInstance 按实例释放其绑定的槽(幂等:未绑定则 no-op)。
 func (s *Scheduler) releaseByInstance(insID int64) {
 	s.slotMu.Lock()
-	jobID, ok := s.held[insID]
+	h, ok := s.held[insID]
 	if ok {
 		delete(s.held, insID)
-		if s.slots[jobID] <= 1 {
-			delete(s.slots, jobID)
+		if s.slots[h.jobID] <= 1 {
+			delete(s.slots, h.jobID)
 		} else {
-			s.slots[jobID]--
+			s.slots[h.jobID]--
 		}
 	}
 	s.slotMu.Unlock()
+	// worker 在飞计数 -1:仅当派发时 Acquire 过(addr 非空=Send 成功绑过 worker)才 Release。
+	// reg nil(测试/未 Start)或 addr 空(派发前失败,未绑 worker)跳过,ReleaseInflight 自身亦幂等。
+	if ok && s.reg != nil && h.addr != "" {
+		s.reg.ReleaseInflight(h.appID, h.addr)
+	}
 	s.notifyWake() // 槽空出:唤醒手动派发器重试排队实例
 }
 
@@ -790,6 +846,16 @@ func (s *Scheduler) stallReason(ins *domain.Instance, job *domain.Job, reg *work
 	if !s.inWarmup(now) && reg != nil && !reg.IsOnline(ins.AppID, ins.WorkerAddress) {
 		return "worker 失联(心跳超时)", domain.StatusFailed
 	}
+	// 接收超时:实例停在 waiting_receive(已派发但 worker 从未回报 running/终态)超过 receiveTimeout——
+	// worker 收到 /run 后迟迟未拉起执行(繁忙队列堆积/卡住/掉单/上报丢失)。仅 waiting_receive 生效:
+	// running 已确认 worker 在执行,走下面的执行超时(TimeoutSec)。warmup 内跳过(同失联判定,避免重启
+	// 误杀:重启后 worker 可能正补报重启前 pending 的 running)。receiveTimeout<=0 关闭(兼容不报 running 的旧 worker)。
+	// 这是"worker 繁忙但心跳正常"卡死场景的核心兜底:不再干等满整个 TimeoutSec,超 receiveTimeout 即 failed 重派。
+	if !s.inWarmup(now) && ins.Status == domain.StatusWaitingReceive &&
+		s.receiveTimeout > 0 && ins.StartTime != nil &&
+		now.Sub(*ins.StartTime) > s.receiveTimeout {
+		return "worker 接收超时(>" + strconv.Itoa(int(s.receiveTimeout.Seconds())) + "s 未进入 running)", domain.StatusFailed
+	}
 	if job.TimeoutSec > 0 && ins.StartTime != nil {
 		if now.Sub(*ins.StartTime) > time.Duration(job.TimeoutSec)*time.Second {
 			return "实例执行超时(>" + strconv.Itoa(job.TimeoutSec) + "s)", domain.StatusTimeout
@@ -876,7 +942,7 @@ func (s *Scheduler) retryInstance(ctx context.Context, job *domain.Job, orig *do
 	}
 	s.appendLogRaw(retryIns, "RETRY", "info",
 		"重试派发 retry_index="+strconv.Itoa(retryIns.RetryIndex)+" (from "+strconv.FormatInt(orig.ID, 10)+")")
-	s.bindHeld(retryIns.ID, job.ID)
+	s.bindHeld(retryIns.ID, job.AppID, job.ID)
 	// 异步派发(同 execute/manual):慢/挂起 worker 不阻塞 retryOnce 单轮;关闭期纳入 wg 跟踪。
 	// panic 时释放该实例绑定的槽(同 execute 兜底)。
 	s.goTrack(func() {
@@ -1029,6 +1095,9 @@ func (s *Scheduler) dispatchToWorker(ctx context.Context, job *domain.Job, ins *
 		s.failDispatch(ins, job, prefix, err.Error())
 		return true
 	}
+	// 派发成功:回填 worker 地址 + Acquire 在飞计数(PickFull 据此负载感知选址,下次优先选空闲 worker,
+	// 避免重试/重派反复打到同一繁忙 worker)。
+	s.bindWorkerAddr(ins.ID, addr)
 	return false
 }
 

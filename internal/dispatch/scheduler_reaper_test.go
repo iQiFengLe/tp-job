@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -261,6 +262,169 @@ func TestReaperExecutionTimeout(t *testing.T) {
 	}
 	if got.NextRetryTime == nil {
 		t.Error("配了 RetryCount 的 timeout 实例应设 next_retry_time(可重试)")
+	}
+}
+
+// TestReaperReceiveTimeout 验证 reaper 把"在线 worker 上停在 waiting_receive 超 receiveTimeout"的实例
+// 标 failed(区别于执行超时 timeout——本实例从未进入 running)。worker 心跳正常(在线),走接收超时而非
+// 失联判定。配 RetryCount 时设 next_retry_time 可重试(配合负载感知选址可能选到其他空闲 worker)。
+// 这是"worker 繁忙但心跳正常"卡死场景的核心兜底测试。
+func TestReaperReceiveTimeout(t *testing.T) {
+	st := newTestStore(t)
+	reg := workerreg.New(time.Minute, nil)
+	il := instancelog.New(t.TempDir(), 0)
+	exec := &fakeExecutor{pick: true}
+	sch := NewScheduler(st, exec, il, 50*time.Millisecond, testLog(), NoopCallbackBuilder{})
+	sch.SetReceiveTimeout(5 * time.Second) // 接收超时 5s;warmup 零值=不启用(不跳过判定)
+
+	app := &domain.App{AppName: "rt", Password: "p"}
+	_ = st.App.Create(app)
+	job := &domain.Job{AppID: app.ID, Name: "j", ExecuteType: "http", RetryCount: 1, RetryIntervalSec: 1}
+	_ = st.Job.Create(job)
+
+	// 注册在线 worker(reaper 不判失联,落到接收超时判定)
+	reg.Heartbeat(workerreg.WorkerInfo{AppID: app.ID, WorkerAddress: "10.0.0.2:9000"})
+
+	// 实例 waiting_receive + 绑定在线 worker + StartTime 在 70s 前(超 5s 接收超时)
+	stime := time.Now().Add(-70 * time.Second)
+	ins := &domain.Instance{
+		JobID: job.ID, AppID: app.ID,
+		Status:        domain.StatusWaitingReceive,
+		WorkerAddress: "10.0.0.2:9000",
+		TriggerType:   "auto",
+		TriggerTime:   stime,
+		StartTime:     &stime,
+	}
+	_ = st.Instance.Create(ins)
+
+	sch.reapOnce(reg)
+
+	got, _ := st.Instance.Get(ins.ID)
+	if got.Status != domain.StatusFailed {
+		t.Fatalf("接收超时应→failed, got %s", got.Status)
+	}
+	if !strings.Contains(got.Result, "接收超时") {
+		t.Errorf("result 应注明接收超时, got %s", got.Result)
+	}
+	if got.NextRetryTime == nil {
+		t.Error("配了 RetryCount 的接收超时实例应设 next_retry_time(可重试)")
+	}
+}
+
+// TestReaperReceiveTimeoutDisabled 验证 receiveTimeout=0(兼容旧 worker)时不触发接收超时:
+// 实例停在 waiting_receive 但不判 failed(保留旧行为),避免误杀从不报 running、直跳 success 的旧 worker 长任务。
+func TestReaperReceiveTimeoutDisabled(t *testing.T) {
+	st := newTestStore(t)
+	reg := workerreg.New(time.Minute, nil)
+	il := instancelog.New(t.TempDir(), 0)
+	exec := &fakeExecutor{pick: true}
+	sch := NewScheduler(st, exec, il, 50*time.Millisecond, testLog(), NoopCallbackBuilder{})
+	// 不调 SetReceiveTimeout:receiveTimeout 零值=关闭
+
+	app := &domain.App{AppName: "rt2", Password: "p"}
+	_ = st.App.Create(app)
+	job := &domain.Job{AppID: app.ID, Name: "j", ExecuteType: "http", RetryCount: 0}
+	_ = st.Job.Create(job)
+	reg.Heartbeat(workerreg.WorkerInfo{AppID: app.ID, WorkerAddress: "10.0.0.3:9000"})
+
+	stime := time.Now().Add(-70 * time.Second)
+	ins := &domain.Instance{
+		JobID: job.ID, AppID: app.ID,
+		Status:        domain.StatusWaitingReceive,
+		WorkerAddress: "10.0.0.3:9000",
+		TriggerType:   "auto",
+		TriggerTime:   stime,
+		StartTime:     &stime,
+	}
+	_ = st.Instance.Create(ins)
+
+	sch.reapOnce(reg)
+
+	got, _ := st.Instance.Get(ins.ID)
+	if got.Status != domain.StatusWaitingReceive {
+		t.Fatalf("receiveTimeout 关闭时不应判接收超时,应仍 waiting_receive, got %s", got.Status)
+	}
+}
+
+// TestBindWorkerAddrNoLeakOnConcurrentRelease 验证 bindWorkerAddr 在 held 已被并发释放时不 Acquire——
+// 否则该 +1 永无配对 Release,inflight 计数永久泄漏,扭曲 PickFull 负载感知选址。
+// 场景:Send 成功后到取 slotMu 之间,实例被并发 stop/cancel/reaper 释放(releaseByInstance 删 held,
+// 此时 addr 仍空故不 Release);随后 bindWorkerAddr 见 held 已删,必须跳过 Acquire。
+func TestBindWorkerAddrNoLeakOnConcurrentRelease(t *testing.T) {
+	st := newTestStore(t)
+	reg := workerreg.New(time.Minute, nil)
+	il := instancelog.New(t.TempDir(), 0)
+	exec := &fakeExecutor{pick: true}
+	sch := NewScheduler(st, exec, il, 50*time.Millisecond, testLog(), NoopCallbackBuilder{})
+	sch.reg = reg // 模拟 Start 注入(生产由 Start 设)
+
+	app := &domain.App{AppName: "leak", Password: "p"}
+	_ = st.App.Create(app)
+	job := &domain.Job{AppID: app.ID, Name: "j", ExecuteType: "http"}
+	_ = st.Job.Create(job)
+
+	// 场景:held 已被并发释放
+	ins := &domain.Instance{JobID: job.ID, AppID: app.ID, Status: domain.StatusQueued}
+	_ = st.Instance.Create(ins)
+	sch.bindHeld(ins.ID, app.ID, job.ID)
+	sch.releaseByInstance(ins.ID)        // 模拟并发:删 held(addr 空→不 Release)
+	sch.bindWorkerAddr(ins.ID, "10.0.0.9:9000") // Send "成功"后回填:held 已删,不应 Acquire
+	if n := reg.Inflight(app.ID, "10.0.0.9:9000"); n != 0 {
+		t.Fatalf("held 未命中时不应 Acquire(否则泄漏), got inflight=%d", n)
+	}
+
+	// 对照:held 命中时正常 Acquire,终态配对 Release
+	ins2 := &domain.Instance{JobID: job.ID, AppID: app.ID, Status: domain.StatusQueued}
+	_ = st.Instance.Create(ins2)
+	sch.bindHeld(ins2.ID, app.ID, job.ID)
+	sch.bindWorkerAddr(ins2.ID, "10.0.0.9:9000")
+	if n := reg.Inflight(app.ID, "10.0.0.9:9000"); n != 1 {
+		t.Fatalf("held 命中时应 Acquire=1, got %d", n)
+	}
+	sch.releaseByInstance(ins2.ID) // 正常终态:配对 Release
+	if n := reg.Inflight(app.ID, "10.0.0.9:9000"); n != 0 {
+		t.Fatalf("终态释放应 Release 归零, got %d", n)
+	}
+}
+
+// TestBindWorkerAddrConcurrentNoLeak 验证 Acquire 在 slotMu 锁内后,同一实例上 bindWorkerAddr 与
+// releaseByInstance 任意并发交错都不泄漏 inflight。修复 TOCTOU:旧实现 Acquire 在 slotMu 锁外,bind 写回
+// addr 并 Unlock 后、Acquire 前的窗口里若 release 先跑(读 addr 非空→Release no-op、删 held),Acquire 落下
+// 成无配对 +1。本测试对每个实例起两个 goroutine 并发跑 bind/release,-race 下应无告警且最终归零。
+func TestBindWorkerAddrConcurrentNoLeak(t *testing.T) {
+	st := newTestStore(t)
+	reg := workerreg.New(time.Minute, nil)
+	il := instancelog.New(t.TempDir(), 0)
+	exec := &fakeExecutor{pick: true}
+	sch := NewScheduler(st, exec, il, 50*time.Millisecond, testLog(), NoopCallbackBuilder{})
+	sch.reg = reg
+
+	app := &domain.App{AppName: "cn", Password: "p"}
+	_ = st.App.Create(app)
+	job := &domain.Job{AppID: app.ID, Name: "j", ExecuteType: "http"}
+	_ = st.Job.Create(job)
+
+	const N = 300
+	addr := "10.0.0.9:9000"
+	var wg sync.WaitGroup
+	for i := 0; i < N; i++ {
+		ins := &domain.Instance{JobID: job.ID, AppID: app.ID, Status: domain.StatusQueued}
+		_ = st.Instance.Create(ins)
+		sch.bindHeld(ins.ID, app.ID, job.ID) // 主线程先建立 held
+		wg.Add(2)
+		go func(id int64) {
+			defer wg.Done()
+			sch.bindWorkerAddr(id, addr) // A:派发成功回填 addr + Acquire
+		}(ins.ID)
+		go func(id int64) {
+			defer wg.Done()
+			sch.releaseByInstance(id) // B:并发终态释放(Stop/reaper/极速终态)
+		}(ins.ID)
+	}
+	wg.Wait()
+	// 修复后(Acquire 锁内原子)任意交错都配对归零;修复前(Acquire 锁外)窄窗口交错会留无配对 +1。
+	if n := reg.Inflight(app.ID, addr); n != 0 {
+		t.Fatalf("并发 bind/release 后 inflight 应归零(无泄漏), got %d", n)
 	}
 }
 
