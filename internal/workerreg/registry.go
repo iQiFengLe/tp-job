@@ -95,6 +95,15 @@ func (r *Registry) onlineLocked(appID int64) []*WorkerInfo {
 	return out
 }
 
+// HasOnlineWorker 该 app 是否有任一在线 worker(心跳未超时)。供派发层区分「无在线 worker」
+// (重启窗口/worker 全挂:临时性,实例应 requeue 等待,不判 failed)与「有在线但 tag 全不匹配」
+// (配置问题:应 failed 给反馈)。与 PickFull/IsOnline 同源(均基于 onlineLocked 的心跳过滤)。
+func (r *Registry) HasOnlineWorker(appID int64) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.onlineLocked(appID)) > 0
+}
+
 // matchTag worker 是否匹配给定任务 tag:
 //
 //	acceptNotTagJob || tag ∈ worker.tags || (tag 空 && worker.tags 空)

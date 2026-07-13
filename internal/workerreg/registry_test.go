@@ -24,6 +24,26 @@ func TestPickByScore(t *testing.T) {
 	}
 }
 
+// HasOnlineWorker:app 是否有任一在线 worker(心跳未超时)。派发层据此区分「无在线 worker」
+// (重启窗口/worker 全挂:requeue 等待)与「有在线但 tag 不匹配」(配置问题:failed)。
+func TestHasOnlineWorker(t *testing.T) {
+	r := New(50*time.Millisecond, discardLog())
+	if r.HasOnlineWorker(1) {
+		t.Fatal("空注册表应无在线 worker")
+	}
+	r.Heartbeat(WorkerInfo{AppID: 1, WorkerAddress: "w1:9", Metrics: mkMetrics(1)})
+	if !r.HasOnlineWorker(1) {
+		t.Fatal("心跳后该 app 应有在线 worker")
+	}
+	if r.HasOnlineWorker(2) {
+		t.Fatal("其他 app 应无在线 worker")
+	}
+	time.Sleep(80 * time.Millisecond) // 心跳超 timeout(50ms)
+	if r.HasOnlineWorker(1) {
+		t.Fatal("心跳超时后应无在线 worker")
+	}
+}
+
 // tag 匹配:仅 tag 命中的 worker 进候选。
 func TestPickTagMatch(t *testing.T) {
 	r := New(time.Minute, discardLog())

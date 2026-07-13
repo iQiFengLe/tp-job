@@ -301,10 +301,13 @@ func (s *Scheduler) execute(ctx context.Context, job *domain.Job, oldNext time.T
 	// 选后即绑派发:PickWorker → MarkDispatched → Send,任一失败由 dispatchToWorker 统一善后
 	// (UpdateResult failed + 衔接 RetryPump 重试;RetryCount=0 时 scheduleRetry 定格 failed 无副作用,
 	// 故对不重试的 job 行为不变)。prefix=「派发」用于 STATUS/DISPATCH 日志文案。
-	if s.dispatchToWorker(ctx, job, ins, "派发") {
-		return
+	if s.dispatchToWorker(ctx, job, ins, "派发") != dispatchNoWorker {
+		return // 已派发(槽随实例到终态)或已 failed(failDispatch 已释放槽)
 	}
-	// 槽随实例到终态(不释放)
+	// 无在线 worker:保持 queued,退避后入优先队列由 RunManualDispatcher 消费,不判 failed。
+	// auto 实例入 pq 符合 RecoverQueued「任意 trigger_type」恢复语义。
+	s.releaseByInstance(ins.ID)
+	s.requeueAfterNoWorker(ins, job, 0)
 }
 
 // ===== 手动触发(优先队列) =====
@@ -489,9 +492,12 @@ func (s *Scheduler) runManualHeld(ctx context.Context, item *manualItem) {
 	}
 	s.bindHeld(item.ins.ID, item.job.AppID, item.job.ID)
 	// 选后即绑派发(同 execute,详见 dispatchToWorker)。
-	if s.dispatchToWorker(ctx, item.job, item.ins, "手动触发派发") {
+	if s.dispatchToWorker(ctx, item.job, item.ins, "手动触发派发") != dispatchNoWorker {
 		return
 	}
+	// 无在线 worker(重启窗口/worker 全挂):实例保持 queued,退避后重入队派发,不判 failed。
+	s.releaseByInstance(item.ins.ID)
+	s.requeueAfterNoWorker(item.ins, item.job, item.priority)
 }
 
 func (s *Scheduler) pendingLen() int {
@@ -952,7 +958,13 @@ func (s *Scheduler) retryInstance(ctx context.Context, job *domain.Job, orig *do
 				s.releaseByInstance(retryIns.ID)
 			}
 		}()
-		s.dispatchToWorker(ctx, job, retryIns, "重试派发")
+		if s.dispatchToWorker(ctx, job, retryIns, "重试派发") != dispatchNoWorker {
+			return
+		}
+		// 无在线 worker:重试实例保持 queued,退避后入优先队列派发,不消耗 RetryCount
+		// (无 worker 不是「派发失败」是「尚未轮到派」,不应推进重试链)。
+		s.releaseByInstance(retryIns.ID)
+		s.requeueAfterNoWorker(retryIns, job, retryIns.Priority)
 	})
 }
 
@@ -1063,23 +1075,44 @@ func computeRetryInterval(retryIntervalSec, retryIndex int, opts domain.JobOptio
 	return applyJitter(interval, jitter)
 }
 
+// dispatchOutcome dispatchToWorker 的派发结果。
+type dispatchOutcome int
+
+const (
+	dispatchOK       dispatchOutcome = iota // 已派发(waiting_receive)
+	dispatchFailed                          // 真失败(已 failDispatch)或并发终态中止;调用方直接 return
+	dispatchNoWorker                        // app 无在线 worker(未 failDispatch);调用方应 requeue 等待
+)
+
+// noWorkerBackoff「无在线 worker」时实例 requeue 的退避:避免空 reg 期 busy-loop pop。取 1s
+// (对齐 scheduler.interval_ms),worker 一上线下轮派发即命中。重启丢失该 timer 不丢实例
+// (DB 仍 queued,RecoverQueued 兜底,同 SubmitManualDelayed 延迟 timer 语义)。
+const noWorkerBackoff = 1 * time.Second
+
 // dispatchToWorker 执行「选后即绑」派发:PickWorker → MarkDispatched → Send。
 // 选定后立即 MarkDispatched 绑定 worker_address(先于 POST),消除「worker 回报 running 早于绑定」的竞态。
-// 任一步失败由 failDispatch 统一善后(UpdateResult failed + STATUS 日志 + 释放槽 + 衔接 RetryPump 重试)并返回 true;
-// 调用方收到 true 应直接 return。prefix 标识来源(「派发」/「手动触发派发」/「重试派发」),用于日志文案。
+// 返回三态:dispatchOK=已派发;dispatchFailed=真失败(已 failDispatch+衔接 RetryPump 重试)或并发终态中止
+// (调用方直接 return);dispatchNoWorker=app 无在线 worker(重启窗口/worker 全挂,未 failDispatch)——与 reaper
+// warmup 守卫对称:reaper 在 warmup 期跳过 worker 失联判定,派发层把「无在线 worker」视为「尚未轮到派」
+// 而非失败,调用方应 requeue 等待。仅「有在线 worker 但 tag 全不匹配」(配置问题)才 failed。
+// prefix 标识来源(「派发」/「手动触发派发」/「重试派发」),用于日志文案。
 // RetryCount=0 时 failDispatch 内 scheduleRetry 定格 failed 无副作用,故对不重试的 job 行为不变。
-func (s *Scheduler) dispatchToWorker(ctx context.Context, job *domain.Job, ins *domain.Instance, prefix string) (failed bool) {
+func (s *Scheduler) dispatchToWorker(ctx context.Context, job *domain.Job, ins *domain.Instance, prefix string) dispatchOutcome {
 	addr, protocol, ok := s.executor.PickWorker(job, ins)
 	if !ok {
+		if s.reg != nil && !s.reg.HasOnlineWorker(job.AppID) {
+			s.appendLogRaw(ins, "STATUS", "info", prefix+"暂无在线 worker,退避后重试派发(实例保持 queued)")
+			return dispatchNoWorker
+		}
 		s.failDispatch(ins, job, prefix, "无可用 worker(tag 不匹配或全部离线)")
-		return true
+		return dispatchFailed
 	}
 	// payload 用 tx 内 latest 行(MarkDispatched 已写 worker_address),无需预先内存赋值。
 	rows, err := s.store.Instance.MarkDispatchedWithCallback(ins.ID, addr, s.cbBuild(job, domain.StatusWaitingReceive))
 	if err != nil {
 		s.log.Error("标记派发失败", "instance_id", ins.ID, "err", err)
 		s.failDispatch(ins, job, prefix, "绑定 worker 失败: "+err.Error())
-		return true
+		return dispatchFailed
 	}
 	if rows == 0 {
 		// 终态守护触发:实例在 Get 后被并发 stop/cancel 写终态,MarkDispatched 未改 status。
@@ -1088,17 +1121,35 @@ func (s *Scheduler) dispatchToWorker(ctx context.Context, job *domain.Job, ins *
 		s.log.Warn(prefix+"中止:实例已被并发置终态", "instance_id", ins.ID)
 		s.appendLogRaw(ins, "STATUS", "warn", prefix+"中止:实例已被并发置终态")
 		s.releaseByInstance(ins.ID)
-		return true
+		return dispatchFailed
 	}
 	s.appendLogRaw(ins, "DISPATCH", "info", prefix+"到 worker "+addr)
 	if err := s.executor.Send(ctx, addr, protocol, job, ins); err != nil {
 		s.failDispatch(ins, job, prefix, err.Error())
-		return true
+		return dispatchFailed
 	}
 	// 派发成功:回填 worker 地址 + Acquire 在飞计数(PickFull 据此负载感知选址,下次优先选空闲 worker,
 	// 避免重试/重派反复打到同一繁忙 worker)。
 	s.bindWorkerAddr(ins.ID, addr)
-	return false
+	return dispatchOK
+}
+
+// requeueAfterNoWorker 把「派发时无在线 worker」的实例退避后重新入优先队列。调用方已完成
+// releaseByInstance(归还 job 槽);本函数只刷新 priority + AfterFunc 延迟入队。实例保持 queued,
+// 不消耗 RetryCount、不判 failed——worker 上线后下轮派发命中(noWorkerBackoff 后)。
+// Get 刷新 priority:SetPriority 可能在实例脱离 pqIndex(pop/未入队)期间改 DB,不刷新会以旧
+// priority 重排使调整延后(对齐 tryAcquire re-push 的 :443 刷新);实例若已并发终态则不重排。
+func (s *Scheduler) requeueAfterNoWorker(ins *domain.Instance, job *domain.Job, fallbackPriority int) {
+	priority := fallbackPriority
+	if cur, err := s.store.Instance.Get(ins.ID); err == nil {
+		if domain.StatusTerminal(cur.Status) {
+			return // 并发 stop/cancel:不再入队,免无意义 pop
+		}
+		priority = cur.Priority
+	} else {
+		s.log.Warn("无 worker requeue 刷新实例失败,用回退 priority", "instance_id", ins.ID, "err", err)
+	}
+	time.AfterFunc(noWorkerBackoff, func() { s.pushPending(ins, job, priority) })
 }
 
 // failDispatch 派发失败统一善后:标记 failed(清 worker 绑定)+ 记 STATUS 日志 + 释放槽 + 衔接重试。

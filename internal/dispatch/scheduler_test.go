@@ -382,7 +382,12 @@ func TestRetryInstanceDedup(t *testing.T) {
 // 回归:原实现派发失败直接 failed 终态,重试链因一次瞬时派发失败被提前耗光(停在 retry_index=1)。
 func TestRetryDispatchFailContinues(t *testing.T) {
 	st := newTestStore(t)
-	reg := workerreg.New(time.Minute, nil) // 无 worker → 每次派发必失败
+	reg := workerreg.New(time.Minute, nil)
+	// 有在线但不可达的 worker:PickWorker 命中(HasOnlineWorker=true → 不走 dispatchNoWorker requeue),
+	// Send 连接失败 → failDispatch → scheduleRetry,RetryPump 兜底重试至 retry_index=2。
+	// (无在线 worker 走 requeue 不耗 RetryCount,另见 TestDispatchNoWorkerRequeues;此处验证真派发失败仍由重试链接管。)
+	reg.Heartbeat(workerreg.WorkerInfo{AppID: 1, WorkerAddress: "127.0.0.1:1",
+		Protocol: workerreg.ProtocolHTTP, Metrics: domain.SystemMetrics{Score: 1}})
 	il := instancelog.New(t.TempDir(), 0)
 	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog(), NoopCallbackBuilder{})
 
@@ -616,10 +621,10 @@ func TestDispatchAbortsOnConcurrentTerminal(t *testing.T) {
 	}
 	sch.bindHeld(ins.ID, job.AppID, job.ID) // 模拟 runManualHeld/retryInstance 派发前的前置绑定
 
-	failed := sch.dispatchToWorker(context.Background(), job, ins, "测试")
+	outcome := sch.dispatchToWorker(context.Background(), job, ins, "测试")
 
-	if !failed {
-		t.Error("rows==0(终态守护)应中止并返回 failed=true")
+	if outcome != dispatchFailed {
+		t.Errorf("rows==0(终态守护)应中止并返回 dispatchFailed, got %v", outcome)
 	}
 	mu.Lock()
 	gotHits := hits
@@ -636,6 +641,80 @@ func TestDispatchAbortsOnConcurrentTerminal(t *testing.T) {
 	}
 	if got.NextRetryTime != nil {
 		t.Errorf("终态实例不应 scheduleRetry, next_retry_time 应为 nil, got %v", got.NextRetryTime)
+	}
+}
+
+// 无在线 worker 时(dispatchNoWorker),queued 实例退避后重入队派发,不判 failed;worker 上线后命中。
+// 回归修复:原实现 PickWorker 失败即 failDispatch,重启窗口(workerreg 空)下被 RecoverQueued 恢复的
+// queued 实例被批量误杀——与 reaper warmup 守卫不对称(reaper 等 worker,派发层却直接 failed)。
+func TestDispatchNoWorkerRequeues(t *testing.T) {
+	st := newTestStore(t)
+	mw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	defer mw.Close()
+	reg := workerreg.New(time.Minute, nil) // 初始无在线 worker
+	il := instancelog.New(t.TempDir(), 0)
+	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog(), NoopCallbackBuilder{})
+	sch.reg = reg // 注入(正常由 Start):dispatchToWorker 的 HasOnlineWorker 据此判定
+	t.Cleanup(func() { sch.stopTimers() }) // 取消 noWorkerBackoff 的 AfterFunc,防悬挂
+
+	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
+	_ = st.Job.Create(&domain.Job{ID: 1, AppID: 1, Name: "j", ExecuteType: "http", MaxConcurrency: 5})
+	job, _ := st.Job.Get(1, 1)
+
+	id, err := sch.SubmitManualDelayed(job, 0, "", 0, "test")
+	if err != nil || id <= 0 {
+		t.Fatalf("SubmitManualDelayed 失败: id=%d err=%v", id, err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go sch.RunManualDispatcher(ctx)
+
+	// 无在线 worker:实例必须保持 queued,不被 failed(修复前此处即 failed)
+	waitFor(t, 2*time.Second, func() bool {
+		got, err := st.Instance.Get(id)
+		return err == nil && got.Status == domain.StatusQueued
+	}, "无在线 worker 时实例应保持 queued,不判 failed")
+
+	// worker 上线:实例应在 noWorkerBackoff(1s) 内被派发为 waiting_receive
+	reg.Heartbeat(workerreg.WorkerInfo{AppID: 1, WorkerAddress: mw.Listener.Addr().String(),
+		Metrics: domain.SystemMetrics{Score: 1}, Protocol: workerreg.ProtocolHTTP, AcceptNotTagJob: true})
+	waitFor(t, 4*time.Second, func() bool {
+		list, _ := st.Instance.ListGeneralizedActive(time.Time{}, 0)
+		return len(list) == 1
+	}, "worker 上线后实例应被派发为 waiting_receive/running")
+}
+
+// 有在线 worker 但 tag 全不匹配(部署配置问题):dispatchFailed(failed),不 requeue。与
+// TestDispatchNoWorkerRequeues 对照:无在线 worker 是临时(requeue),tag 不匹配是配置错误(failed 反馈)。
+func TestDispatchTagMismatchFails(t *testing.T) {
+	st := newTestStore(t)
+	reg := workerreg.New(time.Minute, nil)
+	reg.Heartbeat(workerreg.WorkerInfo{AppID: 1, WorkerAddress: "gpu:9",
+		Metrics: domain.SystemMetrics{Score: 1}, Protocol: workerreg.ProtocolHTTP, Tags: []string{"gpu"}})
+	il := instancelog.New(t.TempDir(), 0)
+	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog(), NoopCallbackBuilder{})
+	sch.reg = reg
+
+	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
+	_ = st.Job.Create(&domain.Job{ID: 1, AppID: 1, Name: "j", ExecuteType: "http", Tag: "cpu"})
+	job, _ := st.Job.Get(1, 1)
+	ins := &domain.Instance{AppID: 1, JobID: job.ID, Status: domain.StatusQueued, TriggerType: "manual", Tag: "cpu"}
+	if err := st.Instance.Create(ins); err != nil {
+		t.Fatal(err)
+	}
+	sch.bindHeld(ins.ID, job.AppID, job.ID) // 模拟 runManualHeld 派发前的前置绑定
+
+	outcome := sch.dispatchToWorker(context.Background(), job, ins, "测试")
+	if outcome != dispatchFailed {
+		t.Fatalf("tag 不匹配(有在线 worker)应 dispatchFailed, got %v", outcome)
+	}
+	got, err := st.Instance.Get(ins.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != domain.StatusFailed {
+		t.Errorf("tag 不匹配应 failed(配置反馈), got %s", got.Status)
 	}
 }
 
