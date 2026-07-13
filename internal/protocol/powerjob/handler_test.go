@@ -476,3 +476,82 @@ func TestOpenApiSaveJobTimeStringCompat(t *testing.T) {
 		t.Fatal("非法 timeExpressionType 应 fail")
 	}
 }
+
+// /openApi/setInstancePriority:tp-job 扩展端点——调整 queued 实例优先级(form 风格,对齐 instance 区)。
+// 覆盖:queued 可调(含 0/负值,落 DB)、非 queued fail、缺/非法 priority fail、实例不存在 fail。
+func TestOpenApiSetInstancePriority(t *testing.T) {
+	d, st := newOpenApiDeps(t)
+	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
+
+	// queued 实例可调;另造一个 running 实例验证非 queued 拒绝
+	qIns := &domain.Instance{JobID: 1, AppID: 1, Status: domain.StatusQueued, Priority: 0}
+	_ = st.Instance.Create(qIns)
+	rIns := &domain.Instance{JobID: 1, AppID: 1, Status: domain.StatusRunning}
+	_ = st.Instance.Create(rIns)
+
+	g := gin.New()
+	RegisterOpenApi(g.Group("/openApi"), d)
+	call := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/openApi/setInstancePriority", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		w := httptest.NewRecorder()
+		g.ServeHTTP(w, req)
+		return w
+	}
+	var resp ResultDTO
+
+	// 正常调整 → success 且落库
+	_ = json.Unmarshal(call("instanceId="+strconv.FormatInt(qIns.ID, 10)+"&priority=10").Body.Bytes(), &resp)
+	if !resp.Success {
+		t.Fatalf("queued 调整应 success: %+v", resp)
+	}
+	mustPriority := func(id int64, want int) {
+		t.Helper()
+		ins, err := st.Instance.Get(id)
+		if err != nil {
+			t.Fatalf("实例 %d 读取失败: %v", id, err)
+		}
+		if ins.Priority != want {
+			t.Fatalf("实例 %d priority=%d, want %d", id, ins.Priority, want)
+		}
+	}
+	mustPriority(qIns.ID, 10)
+
+	// priority=0 是合法值(需显式传,不可用"空判") → success 且落库 0
+	_ = json.Unmarshal(call("instanceId="+strconv.FormatInt(qIns.ID, 10)+"&priority=0").Body.Bytes(), &resp)
+	if !resp.Success {
+		t.Fatalf("priority=0 应 success: %+v", resp)
+	}
+	mustPriority(qIns.ID, 0)
+
+	// priority 负值 → success 且落库
+	_ = json.Unmarshal(call("instanceId="+strconv.FormatInt(qIns.ID, 10)+"&priority=-3").Body.Bytes(), &resp)
+	if !resp.Success {
+		t.Fatalf("priority=-3 应 success: %+v", resp)
+	}
+	mustPriority(qIns.ID, -3)
+
+	// 非 queued(running)→ fail
+	_ = json.Unmarshal(call("instanceId="+strconv.FormatInt(rIns.ID, 10)+"&priority=5").Body.Bytes(), &resp)
+	if resp.Success {
+		t.Fatal("非 queued 实例应 fail")
+	}
+
+	// 缺 priority → fail(0 是合法值,故必填判据只能是"原始字段是否提供")
+	_ = json.Unmarshal(call("instanceId="+strconv.FormatInt(qIns.ID, 10)).Body.Bytes(), &resp)
+	if resp.Success {
+		t.Fatal("缺 priority 应 fail")
+	}
+
+	// 非法 priority(非数字)→ fail
+	_ = json.Unmarshal(call("instanceId="+strconv.FormatInt(qIns.ID, 10)+"&priority=high").Body.Bytes(), &resp)
+	if resp.Success {
+		t.Fatal("非法 priority 应 fail")
+	}
+
+	// 实例不存在 → fail
+	_ = json.Unmarshal(call("instanceId=999999&priority=5").Body.Bytes(), &resp)
+	if resp.Success {
+		t.Fatal("实例不存在应 fail")
+	}
+}

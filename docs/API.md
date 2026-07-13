@@ -428,7 +428,7 @@ curl -XPOST http://127.0.0.1:8080/worker/instances/1/status \
 
 ---
 
-## PowerJob OpenAPI `/openApi/*`(无鉴权,18 端点)
+## PowerJob OpenAPI `/openApi/*`(无鉴权,19 端点)
 
 让原对接 PowerJob 的业务客户端零改动接入。全部 POST、全部 HTTP 200,响应除 `/runJob2` 用 `PowerResultDTO` 外均 `ResultDTO`。
 
@@ -471,11 +471,19 @@ curl -XPOST http://127.0.0.1:8080/worker/instances/1/status \
 | `POST /openApi/stopInstance` | — | form `instanceId`(+`appId`?) | null |
 | `POST /openApi/cancelInstance` | — | form `instanceId` | null |
 | `POST /openApi/retryInstance` | — | form `instanceId` | null(非 failed/timeout fail) |
+| `POST /openApi/setInstancePriority` | —(tp-job 扩展) | form `instanceId`,`priority`(int) | null(非 queued fail) |
 | `POST /openApi/fetchInstanceStatus` | — | form `instanceId` | PowerJob 数字状态码(int) |
 | `POST /openApi/fetchInstanceInfo` | — | form `instanceId` | InstanceInfoDTO |
 | `POST /openApi/queryInstance` | InstancePageQuery | JSON `InstancePageQuery` | PageResult |
 
 `stop` 与 `cancel` 区别:分别落 `stopped` / `canceled` 两态。
+
+**`setInstancePriority`**(tp-job 扩展,原版 PowerJob OpenAPI 无):调整 **queued** 实例优先级。form `instanceId` + `priority`(int,必填,允许负值与 0;数值越大越优先)。仅 queued 实例可调——push 架构下实例一旦派发(`waiting_receive`/`running`)优先级已无作用域,故拒绝 → 非 queued fail `ErrInstanceNotQueued`。可选 `appId` 校验归属(对齐 stop/cancel/retry)。即时生效于内存派发队列(`heap.Fix`)并落 DB(真相源,重启恢复据此重排)。
+
+```bash
+curl -XPOST http://127.0.0.1:8080/openApi/setInstancePriority \
+  -d 'instanceId=5&priority=10'
+```
 
 **`InstancePageQuery`** 字段(JSON):`index`(0-based 页码)、`pageSize`(<=0 默认 10)、`instanceIdEq`(精确查,绕过分页)、`jobIdEq`、`appId`(经优先级规则)、`statusIn`(PowerJob 数字码列表,多状态 OR)。
 

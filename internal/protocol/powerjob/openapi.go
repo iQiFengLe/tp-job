@@ -1,7 +1,8 @@
 // OpenAPI 兼容层(/openApi/*):对齐原版 PowerJob server 的 OpenAPIController,
 // 让原对接 PowerJob 的业务客户端(自研 HTTP 调用)零改动接入 tp-job。
 //
-// 覆盖 PowerJob OpenAPI 的 App/Job/Instance 区共 18 个端点(路径/DTO 对齐 powerjob-common)。
+// 覆盖 PowerJob OpenAPI 的 App/Job/Instance 区端点(路径/DTO 对齐 powerjob-common):原版 18 个 +
+// tp-job 扩展 setInstancePriority(调整 queued 实例优先级,原版 PowerJob OpenAPI 无此能力)。
 // Workflow/WorkflowInstance 区(13 个)因 tp-job 无工作流模型,未实现。不支持官方 Java SDK。
 //
 // 鉴权对齐 PowerJob OpenAPI 默认信任 + 本项目"靠网络隔离"约定(业务客户端普遍不带 token 直连);
@@ -52,6 +53,7 @@ func RegisterOpenApi(r *gin.RouterGroup, d OpenApiDeps) {
 	r.POST("/stopInstance", d.stopInstance)
 	r.POST("/cancelInstance", d.cancelInstance)
 	r.POST("/retryInstance", d.retryInstance)
+	r.POST("/setInstancePriority", d.setInstancePriority) // tp-job 扩展(原版 PowerJob 无)
 	r.POST("/fetchInstanceStatus", d.fetchInstanceStatus)
 	r.POST("/fetchInstanceInfo", d.fetchInstanceInfo)
 	r.POST("/queryInstance", d.queryInstance)
@@ -748,6 +750,40 @@ func (d OpenApiDeps) retryInstance(c *gin.Context) {
 		return
 	}
 	if err := d.Instances.Retry(ins.ID); err != nil {
+		c.JSON(http.StatusOK, ResultFail(err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, ResultOK(nil))
+}
+
+// setInstancePriority POST /openApi/setInstancePriority(form: instanceId, priority[, appId])
+// → ResultDTO<null>。tp-job 扩展端点(原版 PowerJob OpenAPI 无):调整 queued 实例优先级。
+// 对齐 instance 区 form 风格(stop/cancel/retry);priority 必填(空串 fail),允许负值与 0;
+// 非 queued fail(ErrInstanceNotQueued——push 架构下实例一旦派发,调整已无意义)。
+// appId 带则校验实例归属(对齐 stop/cancel/retry 的尽力而为越权防护)。
+func (d OpenApiDeps) setInstancePriority(c *gin.Context) {
+	instanceID := formInt64(c, "instanceId")
+	if instanceID <= 0 {
+		c.JSON(http.StatusOK, ResultFail("instanceId 非法"))
+		return
+	}
+	// priority 不可用 formInt64:0 与负值都是合法优先级,只能按"原始字段是否提供"判必填。
+	pStr := formString(c, "priority")
+	if pStr == "" {
+		c.JSON(http.StatusOK, ResultFail("priority 不能为空"))
+		return
+	}
+	priority, err := strconv.Atoi(strings.TrimSpace(pStr))
+	if err != nil {
+		c.JSON(http.StatusOK, ResultFail("priority 非法: " + pStr))
+		return
+	}
+	ins, err := d.instanceBelongToApp(c, instanceID)
+	if err != nil {
+		c.JSON(http.StatusOK, ResultFail(err.Error()))
+		return
+	}
+	if err := d.Instances.SetPriority(ins.ID, priority); err != nil {
 		c.JSON(http.StatusOK, ResultFail(err.Error()))
 		return
 	}
