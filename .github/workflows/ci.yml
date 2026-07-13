@@ -6,11 +6,25 @@ on:
   pull_request:
 
 jobs:
-  go:
-    name: Go (build / vet / test)
+  ci:
+    name: Build & test (web → go)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # 前端://go:embed web/dist 是编译期快照,且 web/dist 被 .gitignore 排除,
+      # CI 干净环境里不存在 → 必须在 go build 之前先构建出来。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: web/package.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+
+      # Go:此时 web/dist 已就绪,可 embed 进二进制。
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26.x'
@@ -18,19 +32,3 @@ jobs:
       - run: go build -buildvcs=false ./...
       - run: go vet -buildvcs=false ./...
       - run: go test -buildvcs=false ./...
-
-  web:
-    name: Web (build)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: web
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: npm
-          cache-dependency-path: web/package.json
-      - run: npm ci --no-audit --no-fund
-      - run: npm run build
