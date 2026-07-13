@@ -38,10 +38,11 @@ type Scheduler struct {
 	limit    int
 
 	// 手动触发优先队列
-	pqMu  sync.Mutex
-	pq    pqHeap
-	pqSeq int64
-	wake  chan struct{}
+	pqMu    sync.Mutex
+	pq      pqHeap
+	pqIndex map[int64]*manualItem // instanceID → 堆内 item 指针(调整优先级定位用);Push 写、Pop/re-push 删
+	pqSeq   int64
+	wake    chan struct{}
 
 	slotMu sync.Mutex
 	slots  map[int64]int   // jobID -> 在飞实例计数(auto+manual 共享)
@@ -75,9 +76,10 @@ func NewScheduler(st *repository.Store, exec domain.Executor, il *instancelog.Lo
 	return &Scheduler{
 		store: st, executor: exec, il: il, log: log, cbBuilder: cbBuilder,
 		interval: interval, limit: 500,
-		wake:  make(chan struct{}, 1),
-		slots: make(map[int64]int), held: make(map[int64]int64),
-		timers: make(map[int64]*time.Timer),
+		wake:    make(chan struct{}, 1),
+		slots:   make(map[int64]int), held: make(map[int64]int64),
+		pqIndex: make(map[int64]*manualItem),
+		timers:  make(map[int64]*time.Timer),
 		startedAt: time.Now(),
 	}
 }
@@ -293,9 +295,13 @@ type manualItem struct {
 	ins      *domain.Instance
 	priority int
 	seq      int64
+	pqIdx    int // 该 item 在堆数组中的下标,供 heap.Fix 定位;由 Swap/Push 维护
 }
 
-type pqHeap []manualItem
+// pqHeap 手动触发优先队列(指针堆)。指针 + item 内 pqIdx 使"调整堆内实例优先级"可 O(log n)
+// 定位重排(heap.Fix)。pqIdx 不变量:恒等于元素当前下标——Swap 对双方写、Push 设初值 len 维护。
+// (container/heap 的 up/down/Pop/Fix 所有位置变更只经 Swap,从不直接按下标搬数据,故此维护充分。)
+type pqHeap []*manualItem
 
 func (h pqHeap) Len() int { return len(h) }
 func (h pqHeap) Less(i, j int) bool {
@@ -304,9 +310,24 @@ func (h pqHeap) Less(i, j int) bool {
 	}
 	return h[i].seq < h[j].seq
 }
-func (h pqHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
-func (h *pqHeap) Push(x any)   { *h = append(*h, x.(manualItem)) }
-func (h *pqHeap) Pop() any     { old := *h; x := old[len(old)-1]; *h = old[:len(old)-1]; return x }
+func (h pqHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+	h[i].pqIdx = i
+	h[j].pqIdx = j
+}
+func (h *pqHeap) Push(x any) {
+	item := x.(*manualItem)
+	item.pqIdx = len(*h) // 初始下标=append 前长度;后续 up 的 Swap 持续维护
+	*h = append(*h, item)
+}
+func (h *pqHeap) Pop() any {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	old[n-1] = nil // 助 GC(re-push 同指针复用时旧槽置空,append 放回同一指针不冲突)
+	*h = old[:n-1]
+	return x
+}
 
 // SubmitManual 立即手动触发(落库 queued + 入优先队列)。返回 error(落库失败时非 nil)。
 // 不关心 instanceId 的内部调用方用此;需立即拿到 instanceId 的外部触发(OpenAPI runJob)用 SubmitManualDelayed。
@@ -368,7 +389,9 @@ func (s *Scheduler) enqueueManual(ins *domain.Instance, job *domain.Job, priorit
 func (s *Scheduler) pushPending(ins *domain.Instance, job *domain.Job, priority int) {
 	s.pqMu.Lock()
 	s.pqSeq++
-	heap.Push(&s.pq, manualItem{job: job, ins: ins, priority: priority, seq: s.pqSeq})
+	item := &manualItem{job: job, ins: ins, priority: priority, seq: s.pqSeq}
+	heap.Push(&s.pq, item)
+	s.pqIndex[ins.ID] = item
 	s.pqMu.Unlock()
 	s.notifyWake()
 }
@@ -391,8 +414,28 @@ func (s *Scheduler) RunManualDispatcher(ctx context.Context) {
 			// 超限:实例仍为 queued,丢回队列尾部,等槽释放(wake)或兜底退避后重试。
 			// 不归还槽(未抢到)。wake 由 releaseByJob/releaseByInstance 在槽释放时发出,
 			// 使排队实例在终态/失败释放后立即被重派,而非盲轮询。
+			//
+			// re-push 前 Get 刷新 priority:SetPriority 可能在本 item 已 pop(脱离 pqIndex)期间改了 DB,
+			// 不刷新会以旧 priority 重排,使该次调整延迟生效到下次重启。re-push 是并发满的异常路径
+			// (不高频),一次 DB Get 可接受。顺带:若实例在 pop 期间已被 stop/cancel 置终态,直接丢弃
+			// 不 re-push(免一次无意义入堆→再 pop→runManualHeld 终态跳过)。此处不释放槽——本分支
+			// tryAcquire 本就失败(slots 未++)、实例一直 queued 从未进在飞集合,无槽可归;误调
+			// releaseByJob 会减掉别人占的 slots,致 MaxConcurrency 失效超发。
+			if cur, err := s.store.Instance.Get(item.ins.ID); err == nil {
+				if domain.StatusTerminal(cur.Status) {
+					select {
+					case <-ctx.Done():
+						return
+					case <-s.wake:
+					case <-time.After(100 * time.Millisecond):
+					}
+					continue
+				}
+				item.priority = cur.Priority
+			}
 			s.pqMu.Lock()
-			heap.Push(&s.pq, item)
+			heap.Push(&s.pq, item) // 同指针 re-push;Push 内重置 pqIdx 无残留;复用原 seq 保 FIFO 原位
+			s.pqIndex[item.ins.ID] = item
 			s.pqMu.Unlock()
 			select {
 			case <-ctx.Done():
@@ -406,7 +449,7 @@ func (s *Scheduler) RunManualDispatcher(ctx context.Context) {
 	}
 }
 
-func (s *Scheduler) runManualHeld(ctx context.Context, item manualItem) {
+func (s *Scheduler) runManualHeld(ctx context.Context, item *manualItem) {
 	defer func() {
 		if r := recover(); r != nil {
 			s.log.Error("手动触发 panic", "job_id", item.job.ID, "panic", r)
@@ -438,13 +481,34 @@ func (s *Scheduler) pendingLen() int {
 	return s.pq.Len()
 }
 
-func (s *Scheduler) popPending() (manualItem, bool) {
+func (s *Scheduler) popPending() (*manualItem, bool) {
 	s.pqMu.Lock()
 	defer s.pqMu.Unlock()
 	if s.pq.Len() == 0 {
-		return manualItem{}, false
+		return nil, false
 	}
-	return heap.Pop(&s.pq).(manualItem), true
+	item := heap.Pop(&s.pq).(*manualItem)
+	delete(s.pqIndex, item.ins.ID)
+	return item, true
+}
+
+// UpdateQueuedPriority 调整一个 queued 实例在手动派发优先队列里的优先级,即时生效。
+// 命中(实例仍在堆)则改 item.priority + heap.Fix 按 pqIdx 重排;未命中(已 pop 派发中 / 已终态 /
+// 从未入队)返回 false——调用方(service.SetPriority)据此仅落 DB(DB 为权威,重启 RecoverQueued 据此重排;
+// re-push 路径会从 DB 刷新 priority,故无 stale 残留)。必须持 pqMu:heap.Fix 非线程安全,
+// 且 pqIndex 读写需与 Push/Pop 互斥。
+func (s *Scheduler) UpdateQueuedPriority(instanceID int64, priority int) bool {
+	s.pqMu.Lock()
+	defer s.pqMu.Unlock()
+	item, ok := s.pqIndex[instanceID]
+	if !ok {
+		return false
+	}
+	if item.priority != priority { // 无变化免 Fix
+		item.priority = priority
+		heap.Fix(&s.pq, item.pqIdx)
+	}
+	return true
 }
 
 // RecoverQueued 启动恢复:把重启前残留的 queued 实例(任意 trigger_type)重新入优先队列。
@@ -478,7 +542,9 @@ func (s *Scheduler) RecoverQueued() error {
 			continue
 		}
 		s.pqSeq++
-		heap.Push(&s.pq, manualItem{job: job, ins: &ins, priority: ins.Priority, seq: s.pqSeq})
+		item := &manualItem{job: job, ins: &ins, priority: ins.Priority, seq: s.pqSeq}
+		heap.Push(&s.pq, item)
+		s.pqIndex[ins.ID] = item // 写索引:否则重启恢复的实例 UpdateQueuedPriority 查不到
 	}
 	if n := s.pq.Len(); n > 0 {
 		s.log.Info("已恢复重启前排队的实例", "count", n)

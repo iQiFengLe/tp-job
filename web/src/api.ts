@@ -146,6 +146,11 @@ export const api = {
       request<{ id: number }>(`/api/apps/${appId}/instances/${iid}/stop`, { method: 'POST' }),
     retry: (appId: number, iid: number) =>
       request<{ id: number }>(`/api/apps/${appId}/instances/${iid}/retry`, { method: 'POST' }),
+    updatePriority: (appId: number, iid: number, priority: number) =>
+      request<{ id: number; priority: number }>(`/api/apps/${appId}/instances/${iid}/priority`, {
+        method: 'POST',
+        body: JSON.stringify({ priority }),
+      }),
   },
 
   workers: {

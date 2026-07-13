@@ -1,5 +1,5 @@
-import { CheckCircleOutlined, FileTextOutlined, InfoCircleOutlined, RedoOutlined, ReloadOutlined, StopOutlined, SyncOutlined, UnorderedListOutlined, WarningOutlined } from '@ant-design/icons';
-import { App as AntApp, Button, InputNumber, Popconfirm, Select, Space, Table, Tooltip, Typography } from 'antd';
+import { CheckCircleOutlined, FileTextOutlined, FlagOutlined, InfoCircleOutlined, RedoOutlined, ReloadOutlined, StopOutlined, SyncOutlined, UnorderedListOutlined, WarningOutlined } from '@ant-design/icons';
+import { App as AntApp, Button, InputNumber, Modal, Popconfirm, Select, Space, Table, Tooltip, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useEffect, useState } from 'react';
 import { api } from '../api';
@@ -19,6 +19,8 @@ const { Text, Title } = Typography;
 const TERMINAL_STATUSES = ['success', 'failed', 'timeout', 'skipped', 'canceled', 'stopped'];
 const isStoppable = (s: string) => !TERMINAL_STATUSES.includes(s);
 const isRetryable = (s: string) => s === 'failed' || s === 'timeout';
+// 仅 queued 实例可调优先级(push 架构下优先级=派发顺序,已派发则调整无意义)。
+const isQueued = (s: string) => s === 'queued';
 
 // 状态圆点 + 文字(替代旧版 Tag,更素净的现代极简风)
 function StatusBadge({ status }: { status: string }) {
@@ -52,6 +54,10 @@ export default function InstancesView(props: { appId?: number; onError: (error: 
   const [logTitle, setLogTitle] = useState('');
   const [logOpen, setLogOpen] = useState(false);
   const [detailInstance, setDetailInstance] = useState<InstanceView>();
+  // 改优先级 Modal(仅 queued 实例):受控 InputNumber,提交调 updatePriority。
+  const [priorityOpen, setPriorityOpen] = useState(false);
+  const [priorityTarget, setPriorityTarget] = useState<InstanceView>();
+  const [priorityValue, setPriorityValue] = useState(0);
   const { message } = AntApp.useApp();
 
   const load = async (p = page, s = size) => {
@@ -126,6 +132,25 @@ export default function InstancesView(props: { appId?: number; onError: (error: 
     }
   };
 
+  const openPriority = (instance: InstanceView) => {
+    setPriorityTarget(instance);
+    setPriorityValue(instance.priority || 0);
+    setPriorityOpen(true);
+  };
+
+  const submitPriority = async () => {
+    if (!props.appId || !priorityTarget) return;
+    try {
+      await api.instances.updatePriority(props.appId, priorityTarget.id, priorityValue);
+      message.success(`实例 ${priorityTarget.id} 优先级已更新为 ${priorityValue}`);
+      setPriorityOpen(false);
+      load();
+      loadStats();
+    } catch (error) {
+      props.onError(error);
+    }
+  };
+
   const refresh = () => {
     load();
     loadStats();
@@ -157,7 +182,7 @@ export default function InstancesView(props: { appId?: number; onError: (error: 
     { title: '触发时间', dataIndex: 'trigger_time', render: formatTime, width: 180 },
     {
       title: '操作',
-      width: 125,
+      width: 170,
       fixed: 'right',
       render: (_, record) => (
         <Space size="small">
@@ -180,6 +205,13 @@ export default function InstancesView(props: { appId?: number; onError: (error: 
                 重试
               </Button>
             </Popconfirm>
+          )}
+          {isQueued(record.status) && (
+            <Tooltip title="调整优先级(数值越大越优先)">
+              <Button size="small" icon={<FlagOutlined />} onClick={() => openPriority(record)}>
+                优先级
+              </Button>
+            </Tooltip>
           )}
         </Space>
       ),
@@ -255,7 +287,7 @@ export default function InstancesView(props: { appId?: number; onError: (error: 
           className="table-container"
           dataSource={list}
           loading={loading}
-          scroll={{ x: 1650 }}
+          scroll={{ x: 1695 }}
           pagination={{
             current: page,
             pageSize: size,
@@ -271,6 +303,25 @@ export default function InstancesView(props: { appId?: number; onError: (error: 
       </SectionCard>
       <LogsDrawer title={logTitle} open={logOpen} lines={logLines} onClose={() => setLogOpen(false)} />
       <InstanceDetailDrawer instance={detailInstance} onClose={() => setDetailInstance(undefined)} onShowLogs={openLogs} />
+      <Modal
+        title={`调整实例 ${priorityTarget?.id} 优先级`}
+        open={priorityOpen}
+        onOk={submitPriority}
+        onCancel={() => setPriorityOpen(false)}
+        okText="保存"
+        cancelText="取消"
+        destroyOnClose
+      >
+        <div style={{ marginBottom: 8 }}>
+          <Text type="secondary">数值越大越优先(可为负);仅排队中实例可调,已派发则调整无意义。</Text>
+        </div>
+        <InputNumber
+          value={priorityValue}
+          onChange={(v) => setPriorityValue(typeof v === 'number' ? v : 0)}
+          style={{ width: '100%' }}
+          autoFocus
+        />
+      </Modal>
     </section>
   );
 }

@@ -124,6 +124,45 @@ func TestOwnCreateJobValidate(t *testing.T) {
 	}
 }
 
+// setInstancePriority POST .../priority:queued 实例调整成功(200+DB 写入);非 queued→400;跨 app→404。
+// 注:此处实例直接 st.Instance.Create 造,不经 pushPending(不在内存堆),UpdateQueuedPriority 未命中
+// 但 DB 仍写——覆盖"内存未命中仍写 DB"路径;内存堆重排由 scheduler_test.TestUpdateQueuedPriority 覆盖。
+func TestOwnInstancePriority(t *testing.T) {
+	d, st := newDeps(t)
+	req(t, "POST", "/api/apps", CreateAppReq{AppName: "a", Password: "p"}, d) // app 1
+	req(t, "POST", "/api/apps/1/jobs", CreateJobReq{Name: "j", ScheduleKind: "api"}, d)
+
+	// queued 实例:调整成功 + DB 写入
+	queued := &domain.Instance{JobID: 1, AppID: 1, Status: domain.StatusQueued, TriggerType: "manual", Priority: 0}
+	_ = st.Instance.Create(queued)
+	w := req(t, "POST", "/api/apps/1/instances/"+itoa(queued.ID)+"/priority",
+		SetInstancePriorityReq{Priority: 5}, d)
+	if w.Code != http.StatusOK {
+		t.Fatalf("queued 调整应 200, got %d: %s", w.Code, w.Body.String())
+	}
+	got, _ := st.Instance.Get(queued.ID)
+	if got.Priority != 5 {
+		t.Fatalf("DB priority 应=5, got %d", got.Priority)
+	}
+
+	// 非 queued(running)→400(ErrInstanceNotQueued)
+	running := &domain.Instance{JobID: 1, AppID: 1, Status: domain.StatusRunning, TriggerType: "manual"}
+	_ = st.Instance.Create(running)
+	w = req(t, "POST", "/api/apps/1/instances/"+itoa(running.ID)+"/priority",
+		SetInstancePriorityReq{Priority: 3}, d)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("非 queued 应 400, got %d", w.Code)
+	}
+
+	// 跨 app:实例属 app 1,用 app 2 访问 → 404(GetInApp 归属校验,防身份枚举)
+	req(t, "POST", "/api/apps", CreateAppReq{AppName: "b", Password: "p"}, d) // app 2
+	w = req(t, "POST", "/api/apps/2/instances/"+itoa(queued.ID)+"/priority",
+		SetInstancePriorityReq{Priority: 1}, d)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("跨 app 应 404, got %d", w.Code)
+	}
+}
+
 // getInstance 不存在 → 404。
 func TestOwnInstanceNotFound(t *testing.T) {
 	d, _ := newDeps(t)

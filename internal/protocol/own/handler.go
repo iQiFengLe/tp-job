@@ -71,6 +71,7 @@ func ownRoutes(d Deps) []routeDef {
 		{"GET", "/apps/:appId/instances/:iid", d.getInstance, false},
 		{"POST", "/apps/:appId/instances/:iid/stop", d.stopInstance, false},
 		{"POST", "/apps/:appId/instances/:iid/retry", d.retryInstance, false},
+		{"POST", "/apps/:appId/instances/:iid/priority", d.setInstancePriority, false},
 		{"GET", "/apps/:appId/instances/:iid/logs", d.instanceLogs, false},
 
 		{"GET", "/apps/:appId/workers", d.listWorkers, false},
@@ -383,6 +384,26 @@ func (d Deps) retryInstance(c *gin.Context) {
 	ok(c, gin.H{"id": iid})
 }
 
+// setInstancePriority POST /apps/:appId/instances/:iid/priority:调整 queued 实例优先级(即时重排内存堆)。
+// 归属校验同 retryInstance;非 queued 返回 400(ErrInstanceNotQueued,push 架构下已派发则调整无意义)。
+func (d Deps) setInstancePriority(c *gin.Context) {
+	var req SetInstancePriorityReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	iid := paramInt64(c, "iid")
+	if _, err := d.Instances.GetInApp(paramInt64(c, "appId"), iid); err != nil {
+		fail(c, notFoundStatus(err), err.Error())
+		return
+	}
+	if err := d.Instances.SetPriority(iid, req.Priority); err != nil {
+		fail(c, badStatus(err), err.Error())
+		return
+	}
+	ok(c, gin.H{"id": iid, "priority": req.Priority})
+}
+
 // ===== Worker =====
 
 // listWorkers 列出 app 名下在线 worker(读 workerreg 内存注册表;不入库)。
@@ -437,7 +458,8 @@ func parsePage(c *gin.Context) (int, int) {
 func badStatus(err error) int {
 	switch {
 	case isSentinel(err, dservice.ErrAppValidate), isSentinel(err, dservice.ErrJobValidate),
-		isSentinel(err, dservice.ErrInstanceValidate), isSentinel(err, dservice.ErrInstanceNotRetryable):
+		isSentinel(err, dservice.ErrInstanceValidate), isSentinel(err, dservice.ErrInstanceNotRetryable),
+		isSentinel(err, dservice.ErrInstanceNotQueued):
 		return http.StatusBadRequest
 	case isSentinel(err, dservice.ErrAppInUse):
 		return http.StatusConflict

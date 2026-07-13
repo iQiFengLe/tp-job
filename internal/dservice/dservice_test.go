@@ -1,6 +1,7 @@
 package dservice
 
 import (
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -125,6 +126,39 @@ func TestJobValidateWindow(t *testing.T) {
 		ScheduleKind: "cron", ScheduleExpr: "*/1 * * * *",
 		StartTime: &start, EndTime: &end, Enabled: true}); err == nil {
 		t.Fatal("start_time 晚于 end_time 应报错")
+	}
+}
+
+// SetPriority:仅 queued 实例可调(非 queued→ErrInstanceNotQueued);queued 通过时 DB 写入新 priority。
+// 内存堆同步(sch.UpdateQueuedPriority)由 scheduler_test.TestUpdateQueuedPriority 覆盖,此处聚焦 service 编排。
+func TestSetPriority(t *testing.T) {
+	st, sch, il := newSvc(t)
+	appSvc := NewAppService(st)
+	insSvc := NewInstanceService(st, sch, il, dispatch.NoopCallbackBuilder{})
+	app, _ := appSvc.Create("a", "p", 0)
+	_ = st.Job.Create(&domain.Job{ID: 1, AppID: app.ID, Name: "j", ExecuteType: "http", MaxConcurrency: 1})
+
+	// queued 实例:调整成功,DB 写入新 priority
+	queued := &domain.Instance{JobID: 1, AppID: app.ID, Status: domain.StatusQueued, TriggerType: "manual", Priority: 0}
+	_ = st.Instance.Create(queued)
+	if err := insSvc.SetPriority(queued.ID, 7); err != nil {
+		t.Fatalf("queued 实例应可调, got %v", err)
+	}
+	got, _ := st.Instance.Get(queued.ID)
+	if got.Priority != 7 {
+		t.Fatalf("DB priority 应=7, got %d", got.Priority)
+	}
+
+	// running 实例:拒绝 → ErrInstanceNotQueued(push 架构下已派发,调整无意义)
+	running := &domain.Instance{JobID: 1, AppID: app.ID, Status: domain.StatusRunning, TriggerType: "manual"}
+	_ = st.Instance.Create(running)
+	if err := insSvc.SetPriority(running.ID, 3); !errors.Is(err, ErrInstanceNotQueued) {
+		t.Fatalf("running 实例应返回 ErrInstanceNotQueued, got %v", err)
+	}
+
+	// 不存在的实例:Get 报错(ErrInstanceNotFound)
+	if err := insSvc.SetPriority(99999, 1); err == nil {
+		t.Fatal("不存在的实例应报错")
 	}
 }
 

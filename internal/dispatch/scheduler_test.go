@@ -771,3 +771,146 @@ func TestComputeRetryInterval(t *testing.T) {
 		t.Errorf("base=0 应兜底 1s, got %v", got)
 	}
 }
+
+// UpdateQueuedPriority:堆内多实例时调整优先级,heap.Fix 按 pqIdx 即时重排,堆大小不变。
+// 覆盖提权(中间项→最高)、降权(中间项→最低)、未命中(已 pop / 从未入队)返回 false。
+// 不启动 RunManualDispatcher:纯测堆的 Fix 语义,避免实例被异步派发掉。
+func TestUpdateQueuedPriority(t *testing.T) {
+	st := newTestStore(t)
+	reg := workerreg.New(time.Minute, nil)
+	il := instancelog.New(t.TempDir(), 0)
+	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog(), NoopCallbackBuilder{})
+	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
+	_ = st.Job.Create(&domain.Job{ID: 1, AppID: 1, Name: "j", ExecuteType: "http", MaxConcurrency: 1})
+	job, _ := st.Job.Get(1, 1)
+
+	// 入队 3 个 queued 实例,priority 均 0,按 A→B→C 顺序(seq 递增,同 priority 下 FIFO)
+	insA := &domain.Instance{JobID: 1, AppID: 1, Status: domain.StatusQueued, TriggerType: "manual"}
+	insB := &domain.Instance{JobID: 1, AppID: 1, Status: domain.StatusQueued, TriggerType: "manual"}
+	insC := &domain.Instance{JobID: 1, AppID: 1, Status: domain.StatusQueued, TriggerType: "manual"}
+	_ = st.Instance.Create(insA)
+	_ = st.Instance.Create(insB)
+	_ = st.Instance.Create(insC)
+	sch.pushPending(insA, job, 0)
+	sch.pushPending(insB, job, 0)
+	sch.pushPending(insC, job, 0)
+	if n := sch.pendingLen(); n != 3 {
+		t.Fatalf("入队后应 3 项, got %d", n)
+	}
+
+	// 降权 A→-5,提权 B→10,C 保持 0;期望 pop 顺序 B(10) > C(0) > A(-5)
+	if !sch.UpdateQueuedPriority(insA.ID, -5) {
+		t.Fatal("降权 A 应命中(在堆内)")
+	}
+	if !sch.UpdateQueuedPriority(insB.ID, 10) {
+		t.Fatal("提权 B 应命中(在堆内)")
+	}
+	if n := sch.pendingLen(); n != 3 {
+		t.Fatalf("Fix 不应改变堆大小, got %d", n)
+	}
+
+	var order []int64
+	for {
+		item, ok := sch.popPending()
+		if !ok {
+			break
+		}
+		order = append(order, item.ins.ID)
+	}
+	want := []int64{insB.ID, insC.ID, insA.ID}
+	if len(order) != len(want) {
+		t.Fatalf("pop 数量应 %d, got %d (order=%v)", len(want), len(order), order)
+	}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Fatalf("pop 顺序[%d] 应 %d, got %d (order=%v)", i, want[i], order[i], order)
+		}
+	}
+
+	// 未命中:已 pop 出堆的实例 / 从未入队的实例 → 返回 false
+	if sch.UpdateQueuedPriority(insB.ID, 99) {
+		t.Error("已 pop 的实例 UpdateQueuedPriority 应返回 false")
+	}
+	fresh := &domain.Instance{JobID: 1, AppID: 1, Status: domain.StatusQueued, TriggerType: "manual"}
+	_ = st.Instance.Create(fresh)
+	if sch.UpdateQueuedPriority(fresh.ID, 5) {
+		t.Error("从未入队的实例 UpdateQueuedPriority 应返回 false")
+	}
+}
+
+// re-push 终态分支不得误减并发槽。回归:曾在此处调用 releaseByJob,但本分支 tryAcquire 本就失败
+// (slots 未++),误减会把别人占的在飞计数减 1,致 MaxConcurrency 失效超发。
+//
+// 场景:MaxConcurrency=1,A 占住唯一槽(worker 收 POST 不回报 → 卡 waiting_receive 不释放);B 入队
+// 因满载进 re-push 循环;置 B 终态后,终态分支应仅丢弃 B、不动 slots。修复前 releaseByJob 会把
+// slots[1] 由 1 减到 0(delete),断言 slots==1 失败。
+func TestRepushTerminalDoesNotLeakSlot(t *testing.T) {
+	st := newTestStore(t)
+	var mu sync.Mutex
+	hits := 0
+	mw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		w.WriteHeader(200) // 接收派发但不回报终态 → 实例卡 waiting_receive,占住槽
+	}))
+	defer mw.Close()
+
+	reg := workerreg.New(time.Minute, nil)
+	reg.Heartbeat(workerreg.WorkerInfo{
+		AppID: 1, WorkerAddress: mw.Listener.Addr().String(),
+		Metrics: domain.SystemMetrics{Score: 1}, Protocol: workerreg.ProtocolHTTP, AcceptNotTagJob: true,
+	})
+	il := instancelog.New(t.TempDir(), 0)
+	sch := NewScheduler(st, New(reg, time.Second), il, 50*time.Millisecond, discardLog(), NoopCallbackBuilder{})
+	_ = st.App.Create(&domain.App{ID: 1, AppName: "a"})
+	_ = st.Job.Create(&domain.Job{ID: 1, AppID: 1, Name: "j", ExecuteType: "http", MaxConcurrency: 1})
+	job, _ := st.Job.Get(1, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go sch.RunManualDispatcher(ctx)
+
+	// A 立即入队 → 派发后 waiting_receive,占住唯一槽。
+	idA, err := sch.SubmitManualDelayed(job, 0, "", 0, "test")
+	if err != nil || idA <= 0 {
+		t.Fatalf("A 入队失败: err=%v id=%d", err, idA)
+	}
+	waitFor(t, 3*time.Second, func() bool {
+		a, e := st.Instance.Get(idA)
+		return e == nil && a.Status == domain.StatusWaitingReceive
+	}, "A 应派发为 waiting_receive")
+
+	// B 入队:满载(A 占唯一槽)→ tryAcquire 失败进 re-push 循环,不应派发(hits 仍为 1)。
+	idB, err := sch.SubmitManualDelayed(job, 0, "", 0, "test")
+	if err != nil || idB <= 0 {
+		t.Fatalf("B 入队失败: err=%v id=%d", err, idB)
+	}
+	time.Sleep(200 * time.Millisecond) // 等 dispatcher pop B、tryAcquire 失败、进 re-push 循环
+
+	// 置 B 终态:下一轮 re-push 的 Get 见终态 → 走终态分支(应丢弃,不动 slots)。
+	if err := st.Instance.SetStatus(idB, domain.StatusCanceled, "cancel"); err != nil {
+		t.Fatalf("SetStatus B 失败: %v", err)
+	}
+	time.Sleep(400 * time.Millisecond) // 等 re-push 循环(100ms/轮)跑到 Get 见终态并处理
+
+	// 断言 1:slots 未被误减——A 仍占唯一槽(修复前会被 releaseByJob 减到 0)。
+	sch.slotMu.Lock()
+	slotN := sch.slots[1]
+	sch.slotMu.Unlock()
+	if slotN != 1 {
+		t.Errorf("slots[1] 应=1(A 占住),被误减为 %d — re-push 终态分支误减了别人占的槽", slotN)
+	}
+
+	// 断言 2:B 被丢弃、未被重新派发(保持 canceled;满载下 worker 只收到过 A 的派发)。
+	b, _ := st.Instance.Get(idB)
+	if b.Status != domain.StatusCanceled {
+		t.Errorf("B 应保持 canceled(终态丢弃), got %s", b.Status)
+	}
+	mu.Lock()
+	hitsN := hits
+	mu.Unlock()
+	if hitsN != 1 {
+		t.Errorf("worker 应只收到 A 的派发(1 次), got %d — 满载下出现超发派发", hitsN)
+	}
+}

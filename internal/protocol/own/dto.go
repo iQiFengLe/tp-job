@@ -167,6 +167,11 @@ type InstanceView struct {
 	DurationMS     int64      `json:"duration_ms,omitempty"`
 }
 
+// SetInstancePriorityReq 调整 queued 实例优先级(数值越大越优先;0=默认最低,可为负)。仅 queued 实例可调。
+type SetInstancePriorityReq struct {
+	Priority int `json:"priority"`
+}
+
 // ===== Worker(在线节点,读 workerreg 内存注册表)=====
 
 // WorkerView 在线 worker 视图。workerreg 不入库,此为内存快照。

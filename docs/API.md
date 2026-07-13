@@ -327,6 +327,18 @@ curl -XPOST 'http://127.0.0.1:8080/api/apps/1/jobs/1/trigger?priority=5&instance
 
 立即重排 failed/timeout 实例(交 RetryPump)。响应 data:`{id}`。非可重试态 400 `ErrInstanceNotRetryable`。
 
+#### `POST /api/apps/:appId/instances/:iid/priority`
+
+调整 **queued** 实例优先级(数值越大越优先,可为负;0=默认最低)。请求体 `{priority: int}`。响应 data:`{id, priority}`。
+
+仅 queued 实例可调:tp-job 为 push 架构(server 主动 POST worker,worker 端无排队队列),优先级唯一作用域=派发顺序(多个实例抢并发槽时谁先派发出去);实例一旦 `waiting_receive`/`running` 已 POST 出去,调整无意义故拒绝 → 非 queued 返回 400 `ErrInstanceNotQueued`。调整即时生效于内存派发队列(`heap.Fix`),并落 DB(真相源,重启恢复据此重排)。
+
+```bash
+curl -XPOST http://127.0.0.1:8080/api/apps/1/instances/5/priority \
+  -H 'Authorization: Bearer <token>' -H 'Content-Type: application/json' \
+  -d '{"priority":10}'
+```
+
 #### `GET /api/apps/:appId/instances/:iid/logs`
 
 查询:`offset`(默认 0)、`limit`(默认 500)。响应 data:`{lines: [string], total: int}`(按行分页,见 design.md §9)。实例不存在或无日志 404。
@@ -479,7 +491,7 @@ curl -XPOST http://127.0.0.1:8080/worker/instances/1/status \
 
 | 码 | 场景 |
 |---|---|
-| 400 | 参数错误 / 业务校验失败(`ErrAppValidate`/`ErrJobValidate`/`ErrInstanceValidate`/`ErrInstanceNotRetryable`) |
+| 400 | 参数错误 / 业务校验失败(`ErrAppValidate`/`ErrJobValidate`/`ErrInstanceValidate`/`ErrInstanceNotRetryable`/`ErrInstanceNotQueued`) |
 | 401 | 未登录 / 会话失效 |
 | 403 | 越权(非 admin 访问 admin 资源;app 跨 app;worker 地址不一致) |
 | 404 | 资源不存在(app/job/instance/未注册 app) |

@@ -17,6 +17,8 @@ var ErrInstanceNotFound = errors.New("实例不存在")
 var ErrInstanceValidate = errors.New("实例参数校验失败")
 // ErrInstanceNotRetryable 实例当前不可重试(状态非 failed/timeout,或无重试余力)。属业务校验,映射 HTTP 400。
 var ErrInstanceNotRetryable = errors.New("实例当前不可重试")
+// ErrInstanceNotQueued 实例当前非 queued 状态,无法调整优先级(push 架构下已派发则调整无意义)。属业务校验,映射 HTTP 400。
+var ErrInstanceNotQueued = errors.New("实例当前非 queued 状态,无法调整优先级")
 
 // InstanceService 实例业务:状态上报(终态守护 + 释放槽)、查询、日志读取。
 type InstanceService struct {
@@ -184,6 +186,32 @@ func (s *InstanceService) Retry(id int64) error {
 		return fmt.Errorf("%w: 实例无重试余力(retry_index=%d, retry_count=%d)", ErrInstanceNotRetryable, ins.RetryIndex, job.RetryCount)
 	}
 	return s.st.Instance.SetNextRetryTime(id, time.Now())
+}
+
+// SetPriority 调整实例优先级(仅 queued 实例可调,供管理端 POST .../priority)。非 queued 返回
+// ErrInstanceNotQueued(→400)。push 架构下优先级唯一作用域=派发顺序,实例一旦 waiting_receive/
+// running 已 POST 出去,调整无意义故拒绝。
+//
+// 编排:DB 先(权威源,WHERE status=queued 守护;重启 RecoverQueued 据此重排),写成功(rows>0=确认仍
+// queued)再同步内存堆即时重排。竞态:Get 校验后实例可能被并发 pop 派发——DB WHERE status=queued 二次
+// 守护,已派发改态则 rows=0 no-op 且跳过内存同步;re-push 路径会从 DB 刷新 priority,故无 stale 残留。
+// 详见 scheduler.RunManualDispatcher re-push 注释。
+func (s *InstanceService) SetPriority(id int64, priority int) error {
+	ins, err := s.Get(id)
+	if err != nil {
+		return err
+	}
+	if ins.Status != domain.StatusQueued {
+		return fmt.Errorf("%w: 仅 queued 实例可调整优先级,当前状态: %s", ErrInstanceNotQueued, ins.Status)
+	}
+	rows, err := s.st.Instance.UpdatePriority(id, priority)
+	if err != nil {
+		return err
+	}
+	if rows > 0 { // DB 确认仍 queued 才同步内存;实例若刚被 pop 派发则 UpdateQueuedPriority 未命中 no-op
+		s.sch.UpdateQueuedPriority(id, priority)
+	}
+	return nil
 }
 
 func (s *InstanceService) Get(id int64) (*domain.Instance, error) {

@@ -185,6 +185,15 @@ func (s InstanceStore) ClearNextRetryTime(id int64) (bool, error) {
 	return res.RowsAffected > 0, res.Error
 }
 
+// UpdatePriority 调整 queued 实例优先级;WHERE status=queued 守护(防误改已派发实例),非 queued
+// (rows==0)由调用方处理。纯 CRUD 无校验;仅写 priority 单列,与 ClearNextRetryTime 同构。
+func (s InstanceStore) UpdatePriority(id int64, priority int) (int64, error) {
+	res := s.db.Model(&domain.Instance{}).
+		Where("id = ? AND status = ?", id, domain.StatusQueued).
+		Update("priority", priority)
+	return res.RowsAffected, res.Error
+}
+
 // ListRetryDue failed/timeout 且 next_retry_time 到期的实例,供 RetryPump 扫描(两者皆可重试)。
 func (s InstanceStore) ListRetryDue(now time.Time, limit int) ([]domain.Instance, error) {
 	var list []domain.Instance
