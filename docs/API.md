@@ -399,7 +399,7 @@ curl -XPOST http://127.0.0.1:8080/worker/instances/1/status \
 
 ## PowerJob Server 协议 `/server/*`(无鉴权)
 
-让 PowerJob Java worker 不改源码接入。详情见 design.md §6。
+让遵循 PowerJob 字段约定的**自研 http worker** 接入(心跳/状态/日志上报字段对齐 PowerJob `SystemMetrics` 与官方数字状态码)。⚠ 官方 PowerJob Java worker 的心跳/上报走 **AKKA**(`powerjob-remote`)而非 HTTP,不会调用 `workerHeartbeat`/`reportInstanceStatus`/`reportLog`/`queryJobCluster` 这组端点——它们是 tp-job 为自研 worker 提供的 HTTP 兼容层;仅 `/server/assert`、`/server/acquire` 与原版 HTTP 一致(Worker 启动发现 Server 用)。详情见 design.md §6。
 
 | 端点 | 方法 | 请求 | 响应 envelope | data |
 |---|---|---|---|---|
@@ -453,7 +453,7 @@ curl -XPOST http://127.0.0.1:8080/worker/instances/1/status \
 | `POST /openApi/deleteJob` | — | form `appId`,`jobId` | null |
 | `POST /openApi/disableJob` | — | form `appId`,`jobId` | null |
 | `POST /openApi/enableJob` | — | form `appId`,`jobId` | null |
-| `POST /openApi/runJob` | RunJobRequest | form `appId`,`jobId`,`delayMS`?,`instanceParams`? | instanceID(int64) |
+| `POST /openApi/runJob` | RunJobRequest | form `appId`,`jobId`,`instanceParams`?,`delay`? | instanceID(int64) |
 | `POST /openApi/runJob2` | RunJobRequest | JSON `RunJobReq` | instanceID(PowerResultDTO) |
 
 **`SaveJobReq` 字段**(对齐 powerjob-common,全指针):`id`、`jobName`、`jobDescription`、`appId`、`jobParams`、`timeExpressionType`(数字码 1/2/3/4/5 或枚举名 `API`/`CRON`/`FIXED_RATE`/`FIXED_DELAY`/`WORKFLOW`)、`timeExpression`、`startTime`/`endTime`(ms)、`concurrency`、`instanceTimeLimit`(ms→秒存 timeout_sec)、`instanceRetryNum`、`enable`、`tag`。创建时给 `timeExpression` 必须同时给 `timeExpressionType`,否则 fail(防 cron 被静默忽略)。
@@ -461,6 +461,12 @@ curl -XPOST http://127.0.0.1:8080/worker/instances/1/status \
 **`JobInfoQuery` 字段**(JSON,全指针):`idEq`、`jobNameEq`、`jobNameLike`(LIKE %x%)、`tagEq`。
 
 **`runJob`/`runJob2` 的优先级约定**:`instanceParams` 若为 JSON 且含 `priority` 字段(数字或字符串),解出注入实例;否则 0(兼容原协议)。source 分别为 `openapi-runJob` / `openapi-runJob2`,trigger_type=manual。
+
+**与 PowerJob 原版(`powerjob-common`)的字段差异**(对照 `E:\projects\powerjob-ref`):
+
+- **`runJob` 延迟参数**:原版字段名 `delay`(`OpenAPIController.runJob(... Long delay)` / `RunJobRequest.delay`,毫秒);tp-job **优先读 `delayMS`,为空回退 `delay`**(均毫秒),既兼容原版客户端,也兼容早期发 `delayMS` 的调用。
+- **`copyJob` 越权校验**:原版 `copyJob(Long jobId)` 仅收 `jobId`;tp-job 额外要求 `appId`(走 `jobBelongToApp` 越权防护,缺 `appId` 返回 `appId / jobId 非法`)——仅发 `jobId` 的原版客户端需补 `appId`。
+- `SaveJobReq` / `JobInfoQuery` / `InstancePageQuery` 均为原版请求类的**常用子集**(tp-job 无 processor/workflow 模型,`processorInfo`/`executeType`/`lifeCycle`/`outerKey`/时间范围等字段省略);`JobInfoDTO`/`InstanceInfoDTO` 同理,未实现字段(`minCpuCores`/`designatedWorkers`/`wfInstanceId`/`type` 等)不输出。
 
 **`JobInfoDTO`** 关键字段(对齐 `tech.powerjob.common.response.JobInfoDTO`):`id`、`jobName`、`jobDescription`、`appId`、`jobParams`、`timeExpressionType`(1 API/2 CRON/3 FIX_RATE/4 FIX_DELAY)、`timeExpression`、`executeType`(固定 1=STANDALONE)、`processorType`(占位 1=JAVA)、`processorInfo`、`maxInstanceNum`、`concurrency`、`instanceTimeLimit`(ms)、`instanceRetryNum`、`status`(1 正常/2 停止)、`nextTriggerTime`(ms)、`startTime`/`endTime`(ms)、`tag`、`gmtCreate`/`gmtModified`(ms)。
 
