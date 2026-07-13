@@ -238,7 +238,7 @@ go build -buildvcs=false ./... && go vet -buildvcs=false ./... && go test -build
 cd web && npm run build      # 前端门槛:tsc + vite
 ```
 
-- 数据库无历史负担:drop 旧库重建即可(`app` / `job` / `job_instance` / `instance_callback` / `admin_user` 五表由 AutoMigrate 创建)。
+- 表结构由 GORM AutoMigrate 维护,首次启动自动建 `app` / `job` / `job_instance` / `instance_callback` / `admin_user` 五表;开发期改 schema 可删本地 dev 库重建。⚠ 项目暂无版本化迁移脚本,AutoMigrate 仅加列、不改/删列,**升级版本前务必备份生产数据,切勿 drop 生产库**。
 - 调度器/reaper/retry 单测见 `internal/dispatch`;权限矩阵集成测试见 `internal/protocol/own`。
 
 ## 声明
