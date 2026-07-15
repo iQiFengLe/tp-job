@@ -80,6 +80,41 @@ func TestImportJobsBadCronSkipped(t *testing.T) {
 	}
 }
 
+// TestImportJobsExpiredCronImported 合法但已过期的一次性 cron(无未来触发)应照常导入(next_run=nil 不触发),
+// 不计入 Skipped,并给 warning——对齐 PowerJob 允许保存过期 job。
+func TestImportJobsExpiredCronImported(t *testing.T) {
+	d, _ := newDeps(t)
+	appID := createDemoApp(t, d)
+
+	pjs := []powerjob.JobInfoDTO{
+		{ID: 1, JobName: "expired", TimeExpressionType: 2, TimeExpression: "0 0 9 1 1 ? 2020", Status: 1},
+		{ID: 2, JobName: "good", TimeExpressionType: 2, TimeExpression: "0 0 9 * * ? *", Status: 1},
+	}
+	resp := d.importJobs(appID, "test", pjs, false)
+	if resp.Skipped != 0 || resp.Imported != 2 {
+		t.Fatalf("过期 cron 不应跳过:期望 skipped=0 imported=2,得 %+v", resp)
+	}
+	var expired *ImportPowerJobItem
+	for i := range resp.Preview {
+		if resp.Preview[i].Name == "expired" {
+			expired = &resp.Preview[i]
+		}
+	}
+	if expired == nil || expired.Error != "" || expired.Warning == "" {
+		t.Errorf("expired 项应有 warning 无 error,得 %+v", expired)
+	}
+	// 落库校验:过期 job 的 next_run=nil(不触发),good job 应算出 next_run
+	jobList, _, _ := d.Jobs.List(appID, 1, 10)
+	for _, j := range jobList {
+		if j.Name == "expired" && j.NextRunTime != nil {
+			t.Errorf("过期 cron 导入后 next_run 应 nil,得 %v", j.NextRunTime)
+		}
+		if j.Name == "good" && j.NextRunTime == nil {
+			t.Errorf("正常 cron 应算出 next_run_time")
+		}
+	}
+}
+
 // createDemoApp 走 handler 建 app,返回 appID(复用 handler_test 的 req/bodyData)。
 func createDemoApp(t *testing.T, d Deps) int64 {
 	t.Helper()

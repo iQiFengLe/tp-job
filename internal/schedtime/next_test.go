@@ -1,6 +1,7 @@
 package schedtime
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -80,7 +81,10 @@ func TestNextCronNoneExpired(t *testing.T) {
 	now := time.Now()
 	_, err := NextCron("0 0 9 1 1 ? 2020", now) // 2020 已过
 	if err == nil {
-		t.Error("过期 NONE cron 期望返回无未来触发 error")
+		t.Fatal("过期 NONE cron 期望返回无未来触发 error")
+	}
+	if !errors.Is(err, ErrNoFutureTrigger) {
+		t.Errorf("过期 cron 期望 errors.Is(ErrNoFutureTrigger),得 %v", err)
 	}
 }
 

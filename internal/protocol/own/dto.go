@@ -133,7 +133,8 @@ type ImportPowerJobItem struct {
 	ScheduleExpr string `json:"schedule_expr"`
 	Enabled      bool   `json:"enabled"`
 	Conflict     bool   `json:"conflict"` // true=当前 app 已有同源 job(将更新)
-	Error        string `json:"error,omitempty"`
+	Error        string `json:"error,omitempty"`   // 非空=该条转换/解析失败被跳过
+	Warning      string `json:"warning,omitempty"` // 非致命提示,如合法 cron 已过期(将导入但 next_run=nil 不触发)
 }
 
 // ImportPowerJobResp 导入结果。dry_run 时 Imported/Updated 为"预览将…",Skipped 为解析失败数。

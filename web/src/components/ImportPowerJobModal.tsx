@@ -106,9 +106,12 @@ export default function ImportPowerJobModal(props: {
         },
         {
             title: '说明',
-            dataIndex: 'error',
             ellipsis: true,
-            render: (e?: string) => (e ? <span style={{color: 'var(--ant-color-error)', fontSize: 12}}>{e}</span> : '-'),
+            render: (_, r) => {
+                if (r.error) return <span style={{color: 'var(--ant-color-error)', fontSize: 12}}>{r.error}</span>;
+                if (r.warning) return <span style={{color: 'var(--ant-color-warning)', fontSize: 12}}>{r.warning}</span>;
+                return '-';
+            },
         },
     ];
 
@@ -178,7 +181,7 @@ export default function ImportPowerJobModal(props: {
                             <Alert
                                 type="warning"
                                 showIcon
-                                message={`${result.skipped} 个任务因表达式非法或无未来触发将被跳过(详见下表「说明」列)`}
+                                message={`${result.skipped} 个任务因表达式非法将被跳过(详见下表「说明」列)`}
                             />
                         )}
                         <Table

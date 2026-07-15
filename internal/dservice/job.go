@@ -31,7 +31,16 @@ func computeNextRun(job *domain.Job) (*time.Time, error) {
 	if !job.Enabled {
 		return nil, nil
 	}
-	return schedtime.NextByKind(job.ScheduleKind, job.ScheduleExpr, time.Now())
+	next, err := schedtime.NextByKind(job.ScheduleKind, job.ScheduleExpr, time.Now())
+	if err != nil {
+		// 已过期的合法一次性 cron(Quartz 带年份段):无未来触发是预期终态,置 nil 不触发,
+		// 对齐 PowerJob(允许保存过期 job)。仅语法非法才上抛。
+		if errors.Is(err, schedtime.ErrNoFutureTrigger) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return next, nil
 }
 
 // Create 校验 + 推算 NextRunTime + 落库。
@@ -85,11 +94,13 @@ func validateJob(j *domain.Job) error {
 			return errors.New("callback_url 必须是合法 http(s) URL")
 		}
 	}
-	// 启用 + 自动调度类型必须有合法表达式
+	// 启用 + 自动调度类型必须有合法表达式(已过期的合法一次性 cron 例外:无未来触发仍允许,next_run 置 nil)
 	if j.Enabled && (j.ScheduleKind == "cron" || j.ScheduleKind == "fix_rate" ||
 		j.ScheduleKind == "fix_delay" || j.ScheduleKind == "delay") {
 		if _, err := schedtime.NextByKind(j.ScheduleKind, j.ScheduleExpr, time.Now()); err != nil {
-			return err
+			if !errors.Is(err, schedtime.ErrNoFutureTrigger) {
+				return err
+			}
 		}
 	}
 	return nil

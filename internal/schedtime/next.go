@@ -1,6 +1,7 @@
 package schedtime
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -13,6 +14,11 @@ import (
 // 仅消费自建 job(Web 表单填的标准 cron)。PowerJob/Quartz 6~7 段表达式(含秒/年/?/L/W/#)
 // 走 go-quartz 引擎,见 NextCron/ValidateCron。
 var defaultParser = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+
+// ErrNoFutureTrigger 表示表达式合法但已无未来触发时间(典型:Quartz 带年份段的一次性 cron 已过期)。
+// 调用方用 errors.Is(err, ErrNoFutureTrigger) 与"语法非法"区分——前者应允许保存(next_run=nil 不触发,
+// 对齐 PowerJob 允许保存过期 job),后者才拒绝。
+var ErrNoFutureTrigger = errors.New("表达式已过期,无未来触发时间")
 
 // ValidateCron 校验 cron 表达式合法性(双引擎):
 //  1. robfig 5 段 + Descriptor(自建 cron 优先,语义不变);
@@ -44,7 +50,8 @@ func NextCron(expr string, from time.Time) (time.Time, error) {
 	}
 	nextNs, err := trigger.NextFireTime(from.UnixNano()) // go-quartz 入参/返回均为 UnixNano
 	if err != nil {
-		return time.Time{}, fmt.Errorf("cron %q 无未来触发时间: %w", expr, err)
+		// 已过期的一次性 cron:合法但无未来触发。末位 %w 包 ErrNoFutureTrigger,调用方据此与语法非法区分。
+		return time.Time{}, fmt.Errorf("cron %q 无未来触发时间(%v): %w", expr, err, ErrNoFutureTrigger)
 	}
 	return time.Unix(0, nextNs).In(time.Local), nil
 }

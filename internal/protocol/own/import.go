@@ -3,6 +3,7 @@ package own
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/url"
 	"strconv"
 	"strings"
@@ -160,13 +161,17 @@ func (d Deps) importJobs(appID int64, serverKey string, pjs []powerjob.JobInfoDT
 		existingJob := existing[job.FromID]
 		item.Conflict = existingJob != nil
 
-		// 自动调度类型的表达式预检(Quartz cron 由双引擎兼容;非法/无未来触发则跳过)。
+		// 自动调度类型的表达式预检(Quartz cron 由双引擎兼容;语法非法则跳过)。
+		// 已过期的合法一次性 cron(无未来触发)不跳过——对齐 PowerJob 允许保存过期 job,导入后 next_run=nil 不触发。
 		if isAutoKind(job.ScheduleKind) {
 			if _, e := schedtime.NextByKind(job.ScheduleKind, job.ScheduleExpr, now); e != nil {
-				item.Error = "表达式非法或无未来触发: " + e.Error()
-				resp.Skipped++
-				resp.Preview = append(resp.Preview, item)
-				continue
+				if !errors.Is(e, schedtime.ErrNoFutureTrigger) {
+					item.Error = "表达式非法: " + e.Error()
+					resp.Skipped++
+					resp.Preview = append(resp.Preview, item)
+					continue
+				}
+				item.Warning = "表达式已过期(无未来触发),导入后不触发,需改表达式后才会调度"
 			}
 		}
 

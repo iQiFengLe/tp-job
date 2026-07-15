@@ -3,6 +3,7 @@ package dispatch
 import (
 	"container/heap"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
@@ -243,11 +244,16 @@ func (s *Scheduler) execute(ctx context.Context, job *domain.Job, oldNext time.T
 	now := time.Now()
 	newNext, nerr := schedtime.NextByKind(job.ScheduleKind, job.ScheduleExpr, now)
 	if nerr != nil {
-		// 表达式非法(被改坏/边界解析失败):不静默置 nil 停摆——先 error 告警,再置 nil 暂停
-		// 该 job 自动调度,等管理员修表达式后 update 触发重算(比旧版静默吞错多了告警)。
-		s.log.Error("推算下次执行失败,暂停该 job 自动调度",
-			"job_id", job.ID, "kind", job.ScheduleKind, "expr", job.ScheduleExpr, "err", nerr)
-		newNext = nil
+		if errors.Is(nerr, schedtime.ErrNoFutureTrigger) {
+			// 已过期的合法一次性 cron:无未来触发是预期终态(一次性任务触发完即止),静默置 nil 停摆,不告警。
+			newNext = nil
+		} else {
+			// 表达式非法(被改坏/边界解析失败):不静默置 nil 停摆——先 error 告警,再置 nil 暂停
+			// 该 job 自动调度,等管理员修表达式后 update 触发重算(比旧版静默吞错多了告警)。
+			s.log.Error("推算下次执行失败,暂停该 job 自动调度",
+				"job_id", job.ID, "kind", job.ScheduleKind, "expr", job.ScheduleExpr, "err", nerr)
+			newNext = nil
+		}
 	}
 
 	// 生效窗口(可选 StartTime/EndTime):仅约束自动调度,手动触发不受限。

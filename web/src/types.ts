@@ -125,6 +125,7 @@ export interface ImportPowerJobItem {
   enabled: boolean;
   conflict: boolean; // true=当前 app 已有同源 job(将更新)
   error?: string;
+  warning?: string; // 非致命提示,如合法 cron 已过期(将导入但不触发)
 }
 
 export interface ImportPowerJobResp {
